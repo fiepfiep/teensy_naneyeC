@@ -46,7 +46,11 @@ jobs:
       - name: Build
         run: uv run --no-sync mkdocs build --strict
 
+      # enablement lets the workflow token switch Pages on (Source: GitHub Actions)
+      # rather than needing someone to click through repository settings.
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - uses: actions/upload-pages-artifact@v3
         with:
