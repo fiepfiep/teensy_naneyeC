@@ -3,6 +3,7 @@
     python -m naneye.viewer --source replay          reference frames, no hardware needed
     python -m naneye.viewer --source auto            the first Teensy found
     python -m naneye.viewer --source COM7 --depth 10
+    python -m naneye.viewer --source replay --snapshot shot.png   one frame, then exit
 
 Keys: q quit, s save a PNG, r toggle raw/auto contrast, h toggle the histogram,
       SPACE pause, +/- exposure (rows_in_reset), l toggle the LED, [ / ] LED current.
@@ -17,6 +18,8 @@ import numpy as np
 
 from . import protocol
 from .sources import autoscale, open_source
+
+LINE_H = 22
 
 
 def draw_histogram(img: np.ndarray, width: int, height: int = 90) -> np.ndarray:
@@ -33,6 +36,50 @@ def draw_histogram(img: np.ndarray, width: int, height: int = 90) -> np.ndarray:
     return panel
 
 
+def status_lines(header: protocol.Header, img: np.ndarray, fps: float, gaps: int) -> list:
+    saturated = float((img >= (1020 if img.dtype == np.uint16 else 255)).mean() * 100)
+    return [
+        f"frame {header.frame_counter}  {fps:4.1f} fps  {header.format_name}",
+        f"min {int(img.min())}  max {int(img.max())}  mean {img.mean():6.1f}"
+        f"  sat {saturated:.2f}%",
+        f"exp {header.exposure_us() / 1000:6.2f} ms  sclk {header.sclk_hz / 1e6:.3f} MHz"
+        f"  cfg 0x{header.cfg0:04X}/0x{header.cfg1:04X}",
+        f"dropped {header.frames_dropped}  counter gaps {gaps}"
+        f"  rows_failed {header.rows_failed}"
+        + ("  SYNC LOST" if header.sync_lost else ""),
+    ]
+
+
+def compose(header: protocol.Header, img: np.ndarray, scale: int = 2,
+            raw_mode: bool = False, show_hist: bool = True, fps: float = 0.0,
+            gaps: int = 0) -> np.ndarray:
+    """Build the full display image: frame, status bar and optional histogram.
+
+    Shared by the live loop and --snapshot so the two cannot disagree.
+    """
+    import cv2
+
+    if raw_mode:
+        disp = img.astype(np.uint8) if img.dtype == np.uint8 else (img >> 2).astype(np.uint8)
+    else:
+        disp = autoscale(img)
+    view = cv2.resize(disp, (img.shape[1] * scale, img.shape[0] * scale),
+                      interpolation=cv2.INTER_NEAREST)
+    view = cv2.cvtColor(view, cv2.COLOR_GRAY2BGR)
+
+    lines = status_lines(header, img, fps, gaps)
+    bar = np.zeros((LINE_H * len(lines) + 8, view.shape[1], 3), dtype=np.uint8)
+    for i, text in enumerate(lines):
+        colour = (0, 0, 255) if "SYNC LOST" in text else (220, 220, 220)
+        cv2.putText(bar, text, (8, 18 + i * LINE_H), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                    colour, 1, cv2.LINE_AA)
+
+    panels = [view, bar]
+    if show_hist:
+        panels.append(cv2.cvtColor(draw_histogram(img, view.shape[1]), cv2.COLOR_GRAY2BGR))
+    return np.vstack(panels)
+
+
 def main(argv=None):
     import cv2
 
@@ -44,6 +91,8 @@ def main(argv=None):
     ap.add_argument("--clock", type=int, default=12375000)
     ap.add_argument("--scale", type=int, default=2)
     ap.add_argument("--fps", type=float, default=19.3, help="replay rate")
+    ap.add_argument("--snapshot", metavar="PATH",
+                    help="write one composed frame to PATH and exit (no window)")
     args = ap.parse_args(argv)
 
     fmt = {8: protocol.FMT_GRAY8, 10: protocol.FMT_GRAY10,
@@ -53,6 +102,20 @@ def main(argv=None):
     print(f"source: {source.name}")
     for line in getattr(source, "log", []):
         print(f"  {line}")
+
+    if args.snapshot:
+        with source:
+            # Skip a couple of frames so the reported rate is representative.
+            for n, (header, img) in enumerate(source.frames()):
+                if n < 2:
+                    continue
+                shot = compose(header, img, scale=args.scale, fps=args.fps)
+                cv2.imwrite(args.snapshot, shot)
+                print(f"wrote {args.snapshot} ({shot.shape[1]}x{shot.shape[0]})")
+                print(f"  {header.describe()}")
+                return 0
+        print("no frames received")
+        return 1
 
     window = "NanEyeC"
     cv2.namedWindow(window, cv2.WINDOW_NORMAL)
@@ -82,33 +145,8 @@ def main(argv=None):
             fps = (len(times) - 1) / (times[-1] - times[0]) if len(times) > 1 else 0.0
 
             if not paused:
-                disp = img.astype(np.uint8) if (raw_mode and img.dtype == np.uint8) else (
-                    (img >> 2).astype(np.uint8) if raw_mode else autoscale(img))
-                view = cv2.resize(disp, (320 * args.scale, 320 * args.scale),
-                                  interpolation=cv2.INTER_NEAREST)
-                view = cv2.cvtColor(view, cv2.COLOR_GRAY2BGR)
-
-                sat = float((img >= (1020 if img.dtype == np.uint16 else 255)).mean() * 100)
-                lines = [
-                    f"frame {header.frame_counter}  {fps:4.1f} fps  {header.format_name}",
-                    f"min {int(img.min())}  max {int(img.max())}  mean {img.mean():6.1f}"
-                    f"  sat {sat:.2f}%",
-                    f"exp {header.exposure_us() / 1000:6.2f} ms  sclk "
-                    f"{header.sclk_hz / 1e6:.3f} MHz  cfg 0x{header.cfg0:04X}/0x{header.cfg1:04X}",
-                    f"dropped {header.frames_dropped}  counter gaps {gaps}"
-                    f"  rows_failed {header.rows_failed}"
-                    + ("  SYNC LOST" if header.sync_lost else ""),
-                ]
-                bar = np.zeros((22 * len(lines) + 8, view.shape[1], 3), dtype=np.uint8)
-                for i, text in enumerate(lines):
-                    colour = (0, 0, 255) if ("SYNC LOST" in text) else (220, 220, 220)
-                    cv2.putText(bar, text, (8, 18 + i * 22), cv2.FONT_HERSHEY_SIMPLEX,
-                                0.45, colour, 1, cv2.LINE_AA)
-                panels = [view, bar]
-                if show_hist:
-                    hist = draw_histogram(img, view.shape[1])
-                    panels.append(cv2.cvtColor(hist, cv2.COLOR_GRAY2BGR))
-                composite = np.vstack(panels)
+                composite = compose(header, img, scale=args.scale, raw_mode=raw_mode,
+                                    show_hist=show_hist, fps=fps, gaps=gaps)
                 if not sized:
                     cv2.resizeWindow(window, composite.shape[1], composite.shape[0])
                     sized = True
@@ -149,7 +187,8 @@ def main(argv=None):
     cv2.destroyAllWindows()
     if saved:
         print(f"{saved} image(s) saved")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -22,6 +22,10 @@ naneye-record = "naneye.record:main"
 
 [dependency-groups]
 dev = ["pytest>=8.0"]
+docs = [
+    "mkdocs-include-markdown-plugin>=7.3.0",
+    "mkdocs-material>=9.7.7",
+]
 
 [build-system]
 requires = ["hatchling"]

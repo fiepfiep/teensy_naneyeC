@@ -3,8 +3,16 @@
 Streams 320×320 mono images from an ams-OSRAM NanEyeC (on a NanoBerry board) to a Windows PC
 through a Teensy 4.1, over the sensor's half-duplex single-ended interface (SEIM).
 
-Read [spec.md](spec.md) first — it carries the design, the measured ground truth from a
-working reference link, and the milestone acceptance criteria.
+Read [spec.md](spec.md) first — it is the living design record: decisions, the measured
+ground truth from a working reference link, milestones and risks.
+
+Full documentation is an MkDocs site under [docs/](docs/) — overview, hardware and bring-up,
+firmware architecture, host usage and API, and a distilled SEIM protocol reference:
+
+```bash
+uv sync --group docs
+uv run mkdocs serve      # http://127.0.0.1:8000
+```
 
 ## Status
 
@@ -22,7 +30,8 @@ validated against real sensor data.
 ## Layout
 
 ```
-spec.md                 design, measurements, milestones
+spec.md                 living design record: decisions, measurements, milestones
+docs/                   MkDocs documentation site
 doc/                    datasheets, schematic, digital.csv (reference capture)
 firmware/               PlatformIO project for the Teensy 4.1
   src/naneye_regs.h     register model, frame geometry, exposure and clock maths
@@ -51,22 +60,25 @@ full capture skip cleanly when it is absent.
 
 ## Getting started
 
+The host side is managed with [uv](https://docs.astral.sh/uv/):
+
 ```bash
-pip install -r host/requirements.txt
-python tools/decode_golden.py          # decode the reference capture (~50 s first run)
-python -m pytest tests -q              # 34 tests
-python -m platformio run -d firmware   # build the firmware
+uv sync                                    # create the environment from uv.lock
+uv run python tools/decode_golden.py       # decode the reference capture (~50 s first run)
+uv run pytest                              # 34 tests
+uv run python -m platformio run -d firmware  # build the firmware
 ```
 
 The host stack runs with no camera attached, replaying the reference frames through the real
 wire protocol:
 
 ```bash
-cd host && python -m naneye.viewer --source replay
-cd host && python -m naneye.record --source replay --frames 20 --depth 10 --out ../build/demo
+uv run python -m naneye.viewer --source replay
+uv run python -m naneye.record --source replay --frames 20 --depth 10 --out build/demo
 ```
 
-With hardware connected, swap `--source replay` for `--source auto`.
+With hardware connected, swap `--source replay` for `--source auto`. Saleae capture
+automation is an optional extra: `uv sync --extra saleae`.
 
 ## Wiring
 
@@ -106,6 +118,7 @@ STATS
 
 ## Bring-up order
 
-Follow the milestones in spec.md section 9. In short: `SELFTEST` and `PROBE` before
+Follow the milestones in spec.md section 9, written up as a procedure with pass/fail checks
+in [docs/hardware.md](docs/hardware.md#bring-up). In short: `SELFTEST` and `PROBE` before
 believing any image, then a Saleae capture decoded independently with
 `host/naneye/decode.py` and compared against what the Teensy reported for the same frame.

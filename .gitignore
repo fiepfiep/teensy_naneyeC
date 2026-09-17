@@ -14,3 +14,4 @@ capture/
 # If you do want it versioned, use git-lfs rather than a plain commit.
 doc/digital.csv
 .venv/
+site/

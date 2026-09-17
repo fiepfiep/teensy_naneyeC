@@ -1,0 +1,50 @@
+site_name: NanEyeC on Teensy 4.1
+site_description: Streaming a NanEyeC miniature camera to a PC over USB via a Teensy 4.1
+docs_dir: docs
+use_directory_urls: false
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle: { icon: material/weather-night, name: Dark mode }
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle: { icon: material/weather-sunny, name: Light mode }
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - navigation.sections
+    - content.code.copy
+    - toc.follow
+
+nav:
+  - Overview: index.md
+  - Design record (spec.md): design.md
+  - Hardware and bring-up: hardware.md
+  - Firmware architecture: firmware.md
+  - Host usage and API: host.md
+  - SEIM protocol reference: seim.md
+
+plugins:
+  - search
+  # Lets design.md pull in spec.md from the repo root, so the living design record has
+  # exactly one copy and cannot drift from the site.
+  - include-markdown
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.keys
