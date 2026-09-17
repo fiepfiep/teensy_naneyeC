@@ -41,9 +41,11 @@ the exact register sequence, the one-frame latency on register writes, and a def
 reference implementation worth avoiding. Those measurements outrank the datasheet wherever
 they disagree — see [SEIM reference](seim.md) and the [design record](design.md).
 
-The capture itself is not in git (too large, and it is raw input rather than source). One
-real row of it is, as `firmware/src/golden_vector.h`, which is what both the on-device
-`SELFTEST` and the host tests check themselves against.
+The whole of `doc/` is untracked — vendor datasheets, the schematic and the capture are
+third-party or raw input rather than project source, and this repository is public. One real
+row of the capture *is* committed, as `firmware/src/golden_vector.h`, which is what both the
+on-device `SELFTEST` and the host tests check themselves against. `.gitignore` lists what to
+put back in `doc/` and where it comes from.
 
 ## Quick start
 
@@ -80,7 +82,7 @@ With hardware, swap `--source replay` for `--source auto`.
 ```
 spec.md                 living design record (rendered as "Design record" here)
 docs/                   this site
-doc/                    datasheets, schematic, digital.csv (untracked)
+doc/                    untracked: datasheets, schematic, reference capture
 firmware/               PlatformIO project for the Teensy 4.1
 host/naneye/            decoder, transport, sources, viewer, recorder
 tools/                  golden-capture decoder, test-vector generator

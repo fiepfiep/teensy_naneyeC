@@ -35,7 +35,7 @@ validated against real sensor data.
 ```
 spec.md                 living design record: decisions, measurements, milestones
 docs/                   MkDocs documentation site
-doc/                    datasheets, schematic, digital.csv (reference capture)
+doc/                    UNTRACKED: datasheets, schematic, reference capture
 firmware/               PlatformIO project for the Teensy 4.1
   src/naneye_regs.h     register model, frame geometry, exposure and clock maths
   src/seim_unpack.h     12-bit pixel-period extraction (pure logic)
@@ -50,11 +50,13 @@ tests/                  34 tests, no hardware required
 
 ## The reference capture
 
-`doc/digital.csv` is a 434 MB Saleae export (2 channels, 500 MS/s, 0.383 s) of a **working**
-NanoBerry ↔ Raspberry Pi link. It is the source of every measured figure in spec.md
-section 3, and it is deliberately **not committed** — too large for git, and it is raw input
-rather than source. It is expected at `doc/digital.csv`; `tools/decode_golden.py` turns it
-into `build/golden/`.
+`doc/` is **not tracked** — it holds vendor datasheets, the NanoBerry schematic and a
+434 MB logic capture: third-party or raw input rather than project source, in a public
+repository. See `.gitignore` for the file list and where each comes from.
+
+The important one is `doc/digital.csv`, a Saleae export (2 channels, 500 MS/s, 0.383 s) of a
+**working** NanoBerry ↔ Raspberry Pi link. It is the source of every measured figure in
+spec.md section 3; `tools/decode_golden.py` turns it into `build/golden/`.
 
 What the repo does carry is the part that matters for testing: `firmware/src/golden_vector.h`
 holds one real row from that capture plus its expected pixel values, so both the on-device

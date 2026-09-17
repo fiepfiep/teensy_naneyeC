@@ -6,13 +6,20 @@ __pycache__/
 .pytest_cache/
 capture/
 
-# The reference Saleae capture is 434 MB: too large for git, and it is raw input
-# rather than source. Keep it locally in doc/ and regenerate the derived data with:
-#     python tools/decode_golden.py
-# The essential part of it is committed: firmware/src/golden_vector.h holds one real
-# row plus its expected pixel values, which is what the tests and SELFTEST need.
-# If you do want it versioned, use git-lfs rather than a plain commit.
-doc/digital.csv
+# doc/ is local-only and deliberately untracked: vendor datasheets, the NanoBerry
+# schematic, and the 434 MB reference capture. They are third-party or raw input
+# rather than project source, and this repository is public.
+#
+# Obtain them separately and place them here:
+#     doc/NanEyeC_DS000503_3-00.pdf   datasheet (ams-OSRAM)
+#     doc/NanEyeC_AN000611_2-00.pdf   MCU interface app note (ams-OSRAM)
+#     doc/nanoberry_board.pdf         NanoBerry schematic
+#     doc/digital.csv                 reference Saleae capture
+#
+# Nothing in the build or the test suite requires them: the essential part of the
+# capture is committed as firmware/src/golden_vector.h (one real sensor row plus
+# its expected pixels), and tests needing the full capture skip when it is absent.
+doc/
 .venv/
 site/
 .vscode/
