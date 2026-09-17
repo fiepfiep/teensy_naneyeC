@@ -10,7 +10,7 @@ uv sync --group docs     # adds mkdocs-material
 
 ## The sources abstraction
 
-Every tool takes a `--source`, and all of them accept the same three kinds. This is the
+Every tool takes a `--source`, and all of them accept the same kinds. This is the
 reason the host side could be built and tested before any hardware existed: `replay`
 re-encodes reference frames **through the real wire protocol**, so what a tool receives is
 byte-for-byte what the Teensy would send.
@@ -186,7 +186,7 @@ STATS
 ## Tests
 
 ```bash
-uv run pytest          # 34 tests, none needing hardware
+uv run pytest          # 42 tests, none needing hardware
 ```
 
 | File | Covers |
@@ -195,6 +195,7 @@ uv run pytest          # 34 tests, none needing hardware
 | `test_unpack.py` | pixel extraction against the golden row, lossless 10-bit packing |
 | `test_transport.py` | CRC rejection, resync past junk, truncation, drop accounting |
 | `test_golden.py` | the reference capture: row pitch, start/stop bits, noise, mono, registers, the gap defect |
+| `test_sources.py` | replay path resolution, the synthetic fallback, lossless replay round-trip |
 
 Tests needing the 434 MB capture skip cleanly when it is absent. `test_unpack.py` parses the
 generated `golden_vector.h` so the Python decoder is held to the exact data the device's

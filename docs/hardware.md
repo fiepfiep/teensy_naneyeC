@@ -99,7 +99,7 @@ at M2 looks exactly like a wrong answer at M3 if you never checked M2.
 ### M0 — before the camera is connected
 
 ```bash
-uv run pytest                                     # 34 tests
+uv run pytest                                     # 42 tests
 uv run python -m platformio run -d firmware -t upload
 ```
 

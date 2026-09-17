@@ -14,7 +14,7 @@ operate, extend or debug the thing.
 | | |
 |---|---|
 | Reference capture decoded | done — 7 frames, all 716,800 pixel words correctly framed |
-| Host decode, transport, recorder, viewer | done, 34 tests passing, no hardware needed |
+| Host decode, transport, recorder, viewer | done, 42 tests passing, no hardware needed |
 | Firmware | compiles clean; **has never run on hardware** |
 | Bring-up M1 onward | blocked on wiring |
 
@@ -52,7 +52,7 @@ put back in `doc/` and where it comes from.
 ```bash
 uv sync
 uv run python tools/decode_golden.py        # needs doc/digital.csv; ~50 s first run
-uv run pytest                               # 34 tests
+uv run pytest                               # 42 tests
 uv run --group firmware python -m platformio run -d firmware # build the firmware
 ```
 
@@ -87,7 +87,7 @@ doc/                    untracked: datasheets, schematic, reference capture
 firmware/               PlatformIO project for the Teensy 4.1
 host/naneye/            decoder, transport, sources, viewer, recorder
 tools/                  golden-capture decoder, test-vector generator
-tests/                  34 tests, none needing hardware
+tests/                  42 tests, none needing hardware
 ```
 
 ## Building these docs

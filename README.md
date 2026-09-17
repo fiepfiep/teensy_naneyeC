@@ -22,7 +22,7 @@ It is published to <https://fiepfiep.github.io/teensy_naneyeC/> by
 | | |
 |---|---|
 | Reference capture decoded | done — 7 frames, every start/stop bit valid |
-| Host decode + transport + recorder | done, 34 tests passing |
+| Host decode + transport + recorder | done, 42 tests passing |
 | Firmware | compiles clean; **not yet run on hardware** |
 | Hardware bring-up (M1 onward) | blocked on wiring |
 
@@ -45,7 +45,7 @@ firmware/               PlatformIO project for the Teensy 4.1
   src/golden_vector.h   GENERATED: one real row + expected pixels, for SELFTEST
 host/naneye/            decoder, transport, sources, viewer, recorder
 tools/                  golden-capture decoder, test-vector generator
-tests/                  34 tests, no hardware required
+tests/                  42 tests, no hardware required
 ```
 
 ## The reference capture
@@ -70,7 +70,7 @@ The host side is managed with [uv](https://docs.astral.sh/uv/):
 ```bash
 uv sync                                    # create the environment from uv.lock
 uv run python tools/decode_golden.py       # decode the reference capture (~50 s first run)
-uv run pytest                              # 34 tests
+uv run pytest                              # 42 tests
 uv run --group firmware python -m platformio run -d firmware  # build the firmware
 ```
 
