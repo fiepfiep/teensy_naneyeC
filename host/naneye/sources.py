@@ -99,6 +99,69 @@ class FileSource(Source):
         self._f.close()
 
 
+class CaptureSource(Source):
+    """A Saleae CSV export of the SEIM link, decoded and played back as frames.
+
+    This is the raw logic-analyser capture rather than anything the Teensy produced: bits
+    are sampled on SCLK rising edges, rows located by the training-pattern alternation
+    break, and each frame re-encoded through the wire format so the viewer sees exactly
+    what it would see from the device. Per-frame start/stop-bit failures are carried in
+    rows_failed, so a bad capture shows up in the status bar instead of looking fine.
+    """
+
+    def __init__(self, path, fps: float = 19.3, fmt: int = protocol.FMT_GRAY8,
+                 loop: bool = True, cache_dir=None, limit: int | None = None,
+                 verbose: bool = True):
+        import numpy as np
+
+        from . import fake
+
+        self._fake = fake
+        self._fmt = fmt
+        self._fps = fps
+        self._loop = loop
+
+        bits, times = decode.load_or_sample_csv(path, cache_dir=cache_dir,
+                                                verbose=verbose)
+        period = float(np.median(np.diff(times))) if len(times) > 1 else 0.0
+        self.sclk_hz = int(round(1.0 / period)) if period else 0
+
+        self._frames = []
+        self._stats = []
+        for _, img, stats in decode.decode_frames_from_bits(bits, max_frames=limit):
+            self._frames.append(img)
+            self._stats.append(stats)
+        if not self._frames:
+            raise ValueError(f"no complete frames decoded from {path}")
+
+        bad = sum(s["bad_start_bits"] + s["bad_stop_bits"] for s in self._stats)
+        self.name = (f"capture {path}: {len(self._frames)} frames, "
+                     f"SCLK {self.sclk_hz / 1e6:.3f} MHz, {bad} bad framing bits")
+        if verbose:
+            print(f"  decoded {len(self._frames)} frames, {bad} bad framing bits")
+
+    def frames(self):
+        i = 0
+        period = 1.0 / self._fps if self._fps > 0 else 0.0
+        while True:
+            if not self._loop and i >= len(self._frames):
+                return
+            k = i % len(self._frames)
+            img = self._frames[k]
+            st = self._stats[k]
+            pkt = self._fake.frame_packet(
+                img, i, fmt=self._fmt, sclk_hz=self.sclk_hz or 31250000,
+                rows_failed=st["bad_start_bits"] + st["bad_stop_bits"])
+            reader = PacketReader(io.BytesIO(pkt).read)
+            t0 = time.time()
+            yield _decode(reader.next_packet())
+            i += 1
+            if period:
+                dt = period - (time.time() - t0)
+                if dt > 0:
+                    time.sleep(dt)
+
+
 class ReplaySource(Source):
     """Reference frames re-encoded in the wire format and played back at a set rate.
 
@@ -153,6 +216,7 @@ def open_source(spec: str, **kwargs) -> Source:
     'replay'        reference frames from build/golden
     'auto'          the first Teensy serial port found
     'COM7'          that serial port
+    a .csv path     a Saleae capture of the link, decoded and played back
     a file path     a recorded packet stream
     """
     import os
@@ -160,6 +224,10 @@ def open_source(spec: str, **kwargs) -> Source:
     if spec == "replay":
         return ReplaySource(**{k: v for k, v in kwargs.items()
                                if k in ("fps", "fmt", "loop", "golden_dir")})
+    if spec.lower().endswith(".csv"):
+        return CaptureSource(spec, **{k: v for k, v in kwargs.items()
+                                      if k in ("fps", "fmt", "loop", "cache_dir",
+                                               "limit", "verbose")})
     if spec == "auto":
         return DeviceSource(None, **{k: v for k, v in kwargs.items()
                                      if k in ("start", "clock_hz", "depth")})

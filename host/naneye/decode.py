@@ -99,7 +99,7 @@ def raw12_to_image(raw: np.ndarray) -> np.ndarray:
 
 
 # --- Saleae capture decoding -----------------------------------------------------------
-def sample_saleae_csv(path, progress=None):
+def sample_saleae_csv(path, progress=None, max_bits: int | None = None):
     """Sample the data channel on each SCLK rising edge of a Saleae CSV export.
 
     The export is transition-based: each row gives the new state of every channel, so the
@@ -124,11 +124,90 @@ def sample_saleae_csv(path, progress=None):
             if c == 1 and prev_clk == 0:
                 bits.append(d)
                 times.append(p[0])
+                if max_bits is not None and len(bits) >= max_bits:
+                    break
             prev_clk = c
             if progress and (n & 0xFFFFF) == 0:
                 progress(n)
     return (np.frombuffer(bytes(bits), dtype=np.uint8),
             np.array([float(t) for t in times], dtype=np.float64))
+
+
+SPOT_CHECK_BITS = 20000
+
+
+def load_or_sample_csv(path, cache_dir=None, verbose: bool = True):
+    """Sample a Saleae CSV, reusing a cached bit stream when one is available.
+
+    Parsing a 434 MB export takes about 50 s, so the sampled bits and timestamps are
+    cached. A `source.json` beside them records which file produced the cache, and a
+    mismatch forces a re-sample. A cache with no such record is spot-checked against the
+    first SPOT_CHECK_BITS edges of the capture and then labelled, rather than being
+    trusted blindly or thrown away.
+
+    Returns (bits, times).
+    """
+    import json
+    import os
+    import pathlib
+    import time as _time
+
+    from .fake import repo_root
+
+    src = pathlib.Path(path)
+    if not src.is_file():
+        raise FileNotFoundError(f"capture not found: {src}")
+    cache = pathlib.Path(cache_dir) if cache_dir else repo_root() / "build" / "golden"
+    bits_npy, times_npy = cache / "bits.npy", cache / "bit_times.npy"
+    stamp = cache / "source.json"
+
+    want = {"path": str(src.resolve()), "size": src.stat().st_size,
+            "mtime": int(src.stat().st_mtime)}
+
+    if bits_npy.is_file() and times_npy.is_file():
+        have = None
+        if stamp.is_file():
+            try:
+                have = json.load(open(stamp))
+            except Exception:
+                have = None
+        if have == want:
+            if verbose:
+                print(f"using cached bit stream in {cache}")
+            return np.load(bits_npy), np.load(times_npy)
+        if have is None:
+            # A cache from before provenance was recorded. Rather than nag forever or
+            # throw away 50 s of work, spot-check it: re-sample just the first few
+            # thousand edges and compare. Cheap, and enough to catch the wrong file.
+            cached_bits = np.load(bits_npy)
+            probe = SPOT_CHECK_BITS
+            head, _ = sample_saleae_csv(src, max_bits=probe)
+            n = min(len(head), probe, len(cached_bits))
+            if n and np.array_equal(head[:n], cached_bits[:n]):
+                with open(stamp, "w") as f:
+                    json.dump(want, f, indent=2)
+                if verbose:
+                    print(f"verified the existing cache in {cache} against {src.name} "
+                          f"({n} bits) and recorded its provenance")
+                return cached_bits, np.load(times_npy)
+            if verbose:
+                print(f"the cache in {cache} does not match {src.name}, re-sampling")
+        if verbose:
+            print(f"cache in {cache} came from a different capture, re-sampling")
+
+    if verbose:
+        mb = want["size"] / 1e6
+        print(f"sampling {src} ({mb:.0f} MB); this takes ~{max(mb / 9, 1):.0f} s")
+    t0 = _time.time()
+    bits, times = sample_saleae_csv(src)
+    os.makedirs(cache, exist_ok=True)
+    np.save(bits_npy, bits)
+    np.save(times_npy, times)
+    with open(stamp, "w") as f:
+        json.dump(want, f, indent=2)
+    if verbose:
+        print(f"  {len(bits):,} bits in {_time.time() - t0:.1f} s, cached in {cache}")
+    return bits, times
 
 
 def find_row_starts(bits: np.ndarray):

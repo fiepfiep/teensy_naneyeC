@@ -14,7 +14,6 @@ frame1.png. The first parse of a 433 MB CSV takes about 50 s.
 import argparse
 import os
 import sys
-import time
 
 import numpy as np
 
@@ -63,22 +62,6 @@ def print_writes(writes, indent="  "):
         print(f"{indent}bit {pos:<9} {name} = 0x{data:04X}  {desc}")
 
 
-def load_bits(csv_path, cache_dir):
-    bits_npy = os.path.join(cache_dir, "bits.npy")
-    times_npy = os.path.join(cache_dir, "bit_times.npy")
-    if os.path.exists(bits_npy) and os.path.exists(times_npy):
-        return np.load(bits_npy), np.load(times_npy)
-
-    print(f"sampling {csv_path} (this takes ~50 s for a 433 MB export)...")
-    t0 = time.time()
-    bits, times = decode.sample_saleae_csv(csv_path)
-    os.makedirs(cache_dir, exist_ok=True)
-    np.save(bits_npy, bits)
-    np.save(times_npy, times)
-    print(f"  {len(bits):,} bits in {time.time() - t0:.1f} s (cached in {cache_dir})")
-    return bits, times
-
-
 def write_png(img, path):
     try:
         from PIL import Image
@@ -100,7 +83,7 @@ def main():
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
-    bits, times = load_bits(args.csv, args.out)
+    bits, times = decode.load_or_sample_csv(args.csv, cache_dir=args.out)
     period = np.median(np.diff(times))
     print(f"bits sampled          : {len(bits):,}")
     print(f"SCLK                  : {1 / period / 1e6:.3f} MHz "

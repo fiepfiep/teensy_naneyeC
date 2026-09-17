@@ -17,10 +17,28 @@ byte-for-byte what the Teensy would send.
 
 | `--source` | What it is |
 |---|---|
-| `replay` | reference frames from `build/golden`, played at a chosen rate |
+| `replay` | reference frames from `build/golden`, or generated ones if that is absent |
 | `auto` | the first Teensy serial port found (PJRC VID `0x16C0` preferred) |
 | `COM7` | that serial port |
+| a `.csv` path | a Saleae capture of the link, decoded and played back as frames |
 | a file path | a recorded packet stream |
+
+```bash
+uv run python -m naneye.viewer --source doc/digital.csv
+```
+
+Pointing it at a capture decodes the raw logic-analyser export: bits sampled on SCLK rising
+edges, rows found by the training-pattern alternation break, and each frame re-encoded
+through the wire format so the viewer sees what it would see from the device. The clock rate
+comes from the capture's own edge timing, so exposure and SCLK in the status bar are
+measured rather than assumed, and per-frame start/stop-bit failures land in `rows_failed`.
+
+Sampling a 434 MB export takes ~50 s, so the bit stream is cached under `build/golden` with
+a `source.json` recording which capture produced it. An unlabelled cache is spot-checked
+against the first 20,000 edges rather than trusted blindly.
+
+`replay` no longer requires the reference capture: without it you get generated frames,
+labelled `SYNTHETIC` in the source name so they cannot be mistaken for sensor data.
 
 ```python
 from naneye.sources import open_source

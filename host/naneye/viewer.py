@@ -1,6 +1,7 @@
 """Live viewer.
 
     python -m naneye.viewer --source replay          reference frames, no hardware needed
+    python -m naneye.viewer --source doc/digital.csv a Saleae capture, decoded and played
     python -m naneye.viewer --source auto            the first Teensy found
     python -m naneye.viewer --source COM7 --depth 10
     python -m naneye.viewer --source replay --snapshot shot.png   one frame, then exit
