@@ -107,17 +107,26 @@ class ReplaySource(Source):
     """
 
     def __init__(self, frames=None, fps: float = 19.3, fmt: int = protocol.FMT_GRAY8,
-                 loop: bool = True, golden_dir: str = "build/golden"):
+                 loop: bool = True, golden_dir=None, allow_synthetic: bool = True):
         from . import fake
 
+        kind = "reference"
         if frames is None:
-            frames = fake.load_golden_frames(golden_dir)
+            try:
+                frames = fake.load_golden_frames(golden_dir)
+            except FileNotFoundError:
+                if not allow_synthetic:
+                    raise
+                # A fresh clone has no reference capture (doc/ is untracked), so fall back
+                # to generated frames rather than refusing to start.
+                frames = fake.synthetic_frames()
+                kind = "SYNTHETIC (no reference capture found)"
         self._frames = list(frames)
         self._fake = fake
         self._fmt = fmt
         self._fps = fps
         self._loop = loop
-        self.name = f"replay of {len(self._frames)} reference frames at {fps:.1f} fps"
+        self.name = f"replay of {len(self._frames)} {kind} frames at {fps:.1f} fps"
 
     def frames(self):
         i = 0

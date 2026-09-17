@@ -162,9 +162,20 @@ static void handle_command(char* line) {
     } else if (!strcmp(tok[0], "EXP")) {
         Config0 c0 = Config0::unpack(seim::config0());
         Config1 c1 = Config1::unpack(seim::config1());
-        c0.rows_in_reset = (uint8_t)parse_u32(tok[1], c0.rows_in_reset);
-        if (n > 2) c1.rows_delay = (uint8_t)parse_u32(tok[2], c1.rows_delay);
+        // The field is 8 bits but the datasheet caps rows in reset at the number of sensor
+        // rows, so rows_in_reset must not exceed 159; beyond that the exposure formula goes
+        // negative. Clamp rather than write an out-of-spec value, and say so.
+        uint32_t want_rir = parse_u32(tok[1], c0.rows_in_reset);
+        uint32_t want_rd = (n > 2) ? parse_u32(tok[2], c1.rows_delay) : c1.rows_delay;
+        const bool clamped = want_rir > ROWS_IN_RESET_MAX || want_rd > ROWS_DELAY_MAX;
+        if (want_rir > ROWS_IN_RESET_MAX) want_rir = ROWS_IN_RESET_MAX;
+        if (want_rd > ROWS_DELAY_MAX) want_rd = ROWS_DELAY_MAX;
+        c0.rows_in_reset = (uint8_t)want_rir;
+        c1.rows_delay = (uint8_t)want_rd;
         seim::set_config(c0.pack(), c1.pack());
+        if (clamped)
+            reply("EXP clamped to the datasheet limits: rows_in_reset<=%u rows_delay<=%u",
+                  ROWS_IN_RESET_MAX, ROWS_DELAY_MAX);
         reply("EXP rows_in_reset=%u rows_delay=%u -> t_exp=%lu PP (%lu us at %lu Hz)",
               c0.rows_in_reset, c1.rows_delay,
               (unsigned long)exposure_pp(c0.rows_in_reset, c1.rows_delay),

@@ -53,7 +53,7 @@ put back in `doc/` and where it comes from.
 uv sync
 uv run python tools/decode_golden.py        # needs doc/digital.csv; ~50 s first run
 uv run pytest                               # 34 tests
-uv run python -m platformio run -d firmware # build the firmware
+uv run --group firmware python -m platformio run -d firmware # build the firmware
 ```
 
 No camera attached? The host stack replays reference frames through the real wire protocol,
@@ -76,6 +76,7 @@ With hardware, swap `--source replay` for `--source auto`.
 | [Firmware architecture](firmware.md) | Phase sequencer, LPSPI3 + DMA, buffering, the rules that must not be broken |
 | [Host usage and API](host.md) | Viewer, recorder, sources, the `naneye` package, recording format |
 | [SEIM protocol reference](seim.md) | Word formats, frame phases, registers, exposure maths, measured timing |
+| [Datasheet cross-check](datasheet-crosscheck.md) | Every place the code differs from the documentation, and why |
 
 ## Repository layout
 

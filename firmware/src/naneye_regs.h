@@ -33,6 +33,13 @@ constexpr uint16_t WORD_EOF = 0x000;
 inline bool word_is_pixel(uint16_t w) { return (w >> 11) == 1u && (w & 1u) == 0u; }
 inline uint16_t word_pixel(uint16_t w) { return (uint16_t)((w >> 1) & 0x3FFu); }
 
+// --- Field limits (DS000503 section 6.5.1, 7) ------------------------------------------
+// "rows_in_reset[7:0] maximum value is equal to the total number of sensor rows", and
+// rows in reset = 2n + 2, so n <= (HEIGHT - 2) / 2 = 159. The field is 8 bits wide, so
+// larger values fit but are out of specification and make the exposure formula negative.
+constexpr uint8_t ROWS_IN_RESET_MAX = (uint8_t)((HEIGHT - 2) / 2);  // 159
+constexpr uint8_t ROWS_DELAY_MAX = 31;                              // 5-bit field
+
 // --- Register field packing (DS000503 section 7) ---------------------------------------
 struct Config0 {
     uint8_t rows_in_reset = 0;   // [15:8] rows in reset = 2*n + 2

@@ -71,7 +71,7 @@ The host side is managed with [uv](https://docs.astral.sh/uv/):
 uv sync                                    # create the environment from uv.lock
 uv run python tools/decode_golden.py       # decode the reference capture (~50 s first run)
 uv run pytest                              # 34 tests
-uv run python -m platformio run -d firmware  # build the firmware
+uv run --group firmware python -m platformio run -d firmware  # build the firmware
 ```
 
 The host stack runs with no camera attached, replaying the reference frames through the real

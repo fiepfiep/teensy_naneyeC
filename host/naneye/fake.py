@@ -103,18 +103,68 @@ def reader_over_bytes(data: bytes):
     return PacketReader(buf.read)
 
 
-def load_golden_frames(path="build/golden", limit: int | None = None):
+def repo_root():
+    """The repository root, derived from this file's location (host/naneye/fake.py)."""
+    import pathlib
+
+    return pathlib.Path(__file__).resolve().parents[2]
+
+
+def golden_dirs(path=None):
+    """Candidate locations for decoded reference frames, in search order.
+
+    Resolved against the repository root as well as the working directory, so tools work
+    from anywhere rather than only from the root.
+    """
+    import pathlib
+
+    if path is not None:
+        p = pathlib.Path(path)
+        return [p] if p.is_absolute() else [p, repo_root() / p]
+    return [pathlib.Path("build/golden"), repo_root() / "build" / "golden"]
+
+
+def load_golden_frames(path=None, limit: int | None = None):
     """Frames produced by tools/decode_golden.py, skipping the saturated first frame."""
-    import glob
-    import os
     import re
 
-    files = sorted(glob.glob(os.path.join(path, "frame*.npy")),
-                   key=lambda p: int(re.search(r"frame(\d+)", p).group(1)))
-    files = [f for f in files if not f.endswith("frame0.npy")]
-    if not files:
-        raise FileNotFoundError(
-            f"no frames in {path}; run: python tools/decode_golden.py")
-    if limit:
-        files = files[:limit]
-    return [np.load(f) for f in files]
+    tried = []
+    for d in golden_dirs(path):
+        tried.append(str(d))
+        files = sorted(d.glob("frame*.npy"),
+                       key=lambda p: int(re.search(r"frame(\d+)", p.name).group(1)))
+        files = [f for f in files if f.name != "frame0.npy"]
+        if files:
+            if limit:
+                files = files[:limit]
+            return [np.load(f) for f in files]
+
+    raise FileNotFoundError(
+        "no decoded reference frames found; looked in: " + ", ".join(tried) +
+        "\nThey come from the reference capture, which is not in the repository:"
+        "\n  1. put the Saleae export at doc/digital.csv"
+        "\n  2. run: uv run python tools/decode_golden.py")
+
+
+def synthetic_frames(count: int = 6, seed: int = 7):
+    """Generated 10-bit frames, for when no reference capture is available.
+
+    Not a substitute for real sensor data, but enough to exercise the whole host path:
+    a horizontal gradient, a checkerboard, a saturated patch and a dark patch, plus a
+    marker that moves between frames and per-frame noise.
+    """
+    rng = np.random.default_rng(seed)
+    ys, xs = np.mgrid[0:decode.HEIGHT, 0:decode.WIDTH]
+    base = (xs / (decode.WIDTH - 1) * 700 + 160).astype(np.float32)
+    checker = (((xs // 20) + (ys // 20)) % 2) * 60.0
+    base = base + checker
+    base[40:80, 40:80] = 1023.0   # saturated patch
+    base[40:80, 240:280] = 0.0    # dark patch
+
+    out = []
+    for k in range(count):
+        f = base + rng.normal(0.0, 2.7, base.shape).astype(np.float32)
+        cx = 40 + int((decode.WIDTH - 80) * k / max(count - 1, 1))
+        f[decode.HEIGHT - 70:decode.HEIGHT - 30, cx:cx + 40] = 900.0
+        out.append(np.clip(f, 0, 1023).astype(np.uint16))
+    return out
