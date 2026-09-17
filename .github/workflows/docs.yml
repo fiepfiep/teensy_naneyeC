@@ -1,0 +1,63 @@
+name: docs
+
+# Builds the MkDocs site and publishes it to GitHub Pages.
+#
+# One-time setup in the repository: Settings -> Pages -> Build and deployment ->
+# Source: "GitHub Actions". Without that, this workflow's deploy step fails.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/**
+      - mkdocs.yml
+      - spec.md            # rendered into the site by the include-markdown plugin
+      - pyproject.toml
+      - uv.lock
+      - .github/workflows/docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let a running deploy finish rather than cancelling it half-published.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # Only the docs group: mkdocs does not import the package, so there is no
+      # reason to install the project or its runtime dependencies (OpenCV et al).
+      - name: Install docs dependencies
+        run: uv sync --only-group docs --no-install-project
+
+      # --strict turns broken links and bad references into build failures.
+      - name: Build
+        run: uv run --no-sync mkdocs build --strict
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
