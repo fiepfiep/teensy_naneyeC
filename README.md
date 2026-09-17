@@ -14,6 +14,9 @@ uv sync --group docs
 uv run mkdocs serve      # http://127.0.0.1:8000
 ```
 
+It is published to <https://fiepfiep.github.io/teensy_naneyeC/> by
+`.github/workflows/docs.yml` on every push that touches the docs.
+
 ## Status
 
 | | |
