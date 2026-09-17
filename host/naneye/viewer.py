@@ -56,7 +56,7 @@ def main(argv=None):
 
     window = "NanEyeC"
     cv2.namedWindow(window, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(window, 320 * args.scale, 320 * args.scale + 120)
+    sized = False  # the window is fitted to the first composite, panels included
 
     raw_mode = False
     show_hist = True
@@ -108,7 +108,11 @@ def main(argv=None):
                 if show_hist:
                     hist = draw_histogram(img, view.shape[1])
                     panels.append(cv2.cvtColor(hist, cv2.COLOR_GRAY2BGR))
-                cv2.imshow(window, np.vstack(panels))
+                composite = np.vstack(panels)
+                if not sized:
+                    cv2.resizeWindow(window, composite.shape[1], composite.shape[0])
+                    sized = True
+                cv2.imshow(window, composite)
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q") or key == 27:
@@ -122,6 +126,7 @@ def main(argv=None):
                 raw_mode = not raw_mode
             elif key == ord("h"):
                 show_hist = not show_hist
+                sized = False
             elif key == ord(" "):
                 paused = not paused
             elif key in (ord("+"), ord("=")):

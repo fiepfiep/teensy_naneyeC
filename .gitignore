@@ -13,3 +13,4 @@ capture/
 # row plus its expected pixel values, which is what the tests and SELFTEST need.
 # If you do want it versioned, use git-lfs rather than a plain commit.
 doc/digital.csv
+.venv/

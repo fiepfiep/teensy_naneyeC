@@ -1,7 +1,0 @@
-# Host-side dependencies. Install with:  pip install -r host/requirements.txt
-numpy>=1.24
-pillow>=10.0          # PNG output from the golden decoder
-pyserial>=3.5         # live device transport
-opencv-python>=4.8    # viewer
-pytest>=8.0           # tests
-logic2-automation>=1.0.5  # Saleae Logic 2 capture automation (M0)

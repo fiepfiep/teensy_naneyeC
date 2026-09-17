@@ -1,0 +1,39 @@
+[project]
+name = "naneye-teensy"
+version = "0.1.0"
+description = "Host-side support for the NanEyeC / Teensy 4.1 USB camera"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.24",
+    "pillow>=10.0",      # PNG output from the golden decoder
+    "pyserial>=3.5",     # live device transport
+    "opencv-python>=4.8",  # viewer
+]
+
+[project.optional-dependencies]
+# Saleae Logic 2 capture automation, needed from M0 onward. Kept optional so the
+# decode and test paths do not depend on the analyser being installed.
+saleae = ["logic2-automation>=1.0.5"]
+
+[project.scripts]
+naneye-view = "naneye.viewer:main"
+naneye-record = "naneye.record:main"
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# The package lives in host/ rather than src/, so point the build backend at it.
+[tool.hatch.build.targets.wheel]
+packages = ["host/naneye"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Lets the tests run straight from a checkout, whether or not the project has been
+# installed into the environment.
+pythonpath = ["host"]
+addopts = "-q"
