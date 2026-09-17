@@ -1,0 +1,15 @@
+# Build outputs and caches
+build/
+.pio/
+__pycache__/
+*.pyc
+.pytest_cache/
+capture/
+
+# The reference Saleae capture is 434 MB: too large for git, and it is raw input
+# rather than source. Keep it locally in doc/ and regenerate the derived data with:
+#     python tools/decode_golden.py
+# The essential part of it is committed: firmware/src/golden_vector.h holds one real
+# row plus its expected pixel values, which is what the tests and SELFTEST need.
+# If you do want it versioned, use git-lfs rather than a plain commit.
+doc/digital.csv

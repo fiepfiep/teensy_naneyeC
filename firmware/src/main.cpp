@@ -1,0 +1,309 @@
+// NanEyeC -> Teensy 4.1 -> USB camera firmware. See spec.md.
+//
+// The capture loop owns the sensor link: it must never block on USB, because a stalled host
+// would cost us sensor synchronisation. So frames are double buffered, transmitted
+// opportunistically in the idle time between row transfers, and whole frames are dropped
+// (and counted) if the host cannot keep up. A frame is never truncated.
+
+#include <Arduino.h>
+#include <string.h>
+
+#include "board.h"
+#include "golden_vector.h"
+#include "led_dac.h"
+#include "naneye_regs.h"
+#include "naneye_seim.h"
+#include "seim_unpack.h"
+#include "usb_proto.h"
+
+using namespace naneye;
+
+static constexpr const char* FW_VERSION = "0.1.0";
+
+// Two frame buffers of 128,000 bytes: enough for packed 10-bit (320*320*10/8). The raw12
+// diagnostic format needs 209,920 bytes, so it borrows the whole region and runs single
+// buffered, which is fine because it is only used for bring-up.
+static constexpr size_t FB_SIZE = 128000;
+static DMAMEM uint8_t s_fb[2 * FB_SIZE];
+
+static uint8_t s_format = proto::FMT_GRAY8;
+static bool s_run = false;
+static uint32_t s_frame_counter = 0;
+static uint32_t s_frames_dropped = 0;
+static uint32_t s_frames_sent = 0;
+
+// --- Opportunistic transmitter ----------------------------------------------------------
+// Two segments: the header, then the payload. Pumped from the row gaps during capture.
+struct Tx {
+    proto::Header header;
+    const uint8_t* payload = nullptr;
+    size_t sent = 0;
+    size_t total = 0;
+    bool active = false;
+} static s_tx;
+
+static void tx_begin(const proto::Header& h, const uint8_t* payload) {
+    s_tx.header = h;
+    s_tx.payload = payload;
+    s_tx.sent = 0;
+    s_tx.total = sizeof(proto::Header) + h.payload_len;
+    s_tx.active = true;
+}
+
+// Never blocks: writes only what the USB endpoint has room for right now.
+static void tx_pump() {
+    if (!s_tx.active) return;
+    if (!Serial) {
+        s_tx.active = false;
+        return;
+    }
+    int room = Serial.availableForWrite();
+    while (room > 0 && s_tx.sent < s_tx.total) {
+        const uint8_t* src;
+        size_t avail;
+        if (s_tx.sent < sizeof(proto::Header)) {
+            src = (const uint8_t*)&s_tx.header + s_tx.sent;
+            avail = sizeof(proto::Header) - s_tx.sent;
+        } else {
+            const size_t off = s_tx.sent - sizeof(proto::Header);
+            src = s_tx.payload + off;
+            avail = s_tx.total - s_tx.sent;
+        }
+        const size_t n = ((size_t)room < avail) ? (size_t)room : avail;
+        const size_t w = Serial.write(src, n);
+        s_tx.sent += w;
+        room -= (int)w;
+        if (w < n) break;
+    }
+    if (s_tx.sent >= s_tx.total) s_tx.active = false;
+}
+
+static size_t frame_payload_bytes(uint8_t format) {
+    return (size_t)row_payload_bytes(format) * HEIGHT;
+}
+
+// --- Commands ---------------------------------------------------------------------------
+static void reply(const char* fmt, ...) {
+    char buf[200];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    proto::send_text(proto::TYPE_RESPONSE, "%s", buf);
+}
+
+static uint32_t parse_u32(const char* s, uint32_t dflt) {
+    if (!s || !*s) return dflt;
+    return (uint32_t)strtoul(s, nullptr, 0);
+}
+
+// Verify the unpack path against a row captured from the working reference link, so the
+// decode can be trusted before any image is believed. See tools/make_golden_vector.py.
+static void selftest() {
+    uint8_t gray8[WIDTH];
+    const uint32_t bad = unpack_row_gray8(golden::ROW_WORDS_DATA, gray8);
+    uint32_t mismatches = 0;
+    for (uint32_t i = 0; i < WIDTH; i++) {
+        if (gray8[i] != (uint8_t)(golden::EXPECTED_PIXELS[i] >> 2)) mismatches++;
+    }
+    const uint32_t training = count_training(golden::ROW_WORDS_DATA, WORD_TRAINING);
+    reply("SELFTEST unpack: bad_words=%lu mismatches=%lu training=%lu/8 -> %s",
+          (unsigned long)bad, (unsigned long)mismatches, (unsigned long)training,
+          (bad == 0 && mismatches == 0 && training == 8) ? "PASS" : "FAIL");
+
+    // Exposure maths against the values decoded from the reference capture.
+    const uint32_t e1 = exposure_pp(0, 0);
+    const uint32_t e2 = exposure_pp(127, 0);
+    reply("SELFTEST exposure: rir=0 -> %lu PP (expect 105616), rir=127 -> %lu PP (expect 22304) -> %s",
+          (unsigned long)e1, (unsigned long)e2,
+          (e1 == 105616u && e2 == 22304u) ? "PASS" : "FAIL");
+}
+
+static void handle_command(char* line) {
+    // Split into a verb and up to three arguments.
+    char* tok[4] = {nullptr, nullptr, nullptr, nullptr};
+    int n = 0;
+    for (char* p = strtok(line, " \t"); p && n < 4; p = strtok(nullptr, " \t")) tok[n++] = p;
+    if (n == 0) return;
+    for (char* p = tok[0]; *p; p++) *p = (char)toupper(*p);
+
+    if (!strcmp(tok[0], "ID")) {
+        reply("naneye-teensy %s  sclk=%lu Hz  cfg0=0x%04X cfg1=0x%04X  fmt=%u",
+              FW_VERSION, (unsigned long)seim::sclk_hz(), seim::config0(), seim::config1(),
+              s_format);
+    } else if (!strcmp(tok[0], "POWER")) {
+        seim::power(parse_u32(tok[1], 1) != 0);
+        reply("POWER %d", seim::powered() ? 1 : 0);
+    } else if (!strcmp(tok[0], "CLK")) {
+        const ClockSetting& c = seim::set_clock(parse_u32(tok[1], 12375000u));
+        reply("CLK %lu Hz  sckdiv=%u mclk_mode=%u high_speed=%u",
+              (unsigned long)c.sclk_hz, c.sckdiv, c.mclk_mode, c.high_speed);
+    } else if (!strcmp(tok[0], "SAMPLE")) {
+        seim::set_delayed_sample(parse_u32(tok[1], 0) != 0);
+        reply("SAMPLE %d", seim::delayed_sample() ? 1 : 0);
+    } else if (!strcmp(tok[0], "START")) {
+        if (seim::start()) {
+            s_run = true;
+            reply("START ok  streaming");
+        } else {
+            s_run = false;
+            reply("START failed: no training pattern from the sensor. Check power, wiring "
+                  "and that SDAT reaches the sensor.");
+        }
+    } else if (!strcmp(tok[0], "STOP")) {
+        s_run = false;
+        seim::stop();
+        reply("STOP");
+    } else if (!strcmp(tok[0], "DEPTH")) {
+        const uint32_t d = parse_u32(tok[1], 8);
+        s_format = (d == 10) ? proto::FMT_GRAY10 : (d == 12) ? proto::FMT_RAW12
+                                                             : proto::FMT_GRAY8;
+        reply("DEPTH %u  payload=%u bytes/frame", d, (unsigned)frame_payload_bytes(s_format));
+    } else if (!strcmp(tok[0], "EXP")) {
+        Config0 c0 = Config0::unpack(seim::config0());
+        Config1 c1 = Config1::unpack(seim::config1());
+        c0.rows_in_reset = (uint8_t)parse_u32(tok[1], c0.rows_in_reset);
+        if (n > 2) c1.rows_delay = (uint8_t)parse_u32(tok[2], c1.rows_delay);
+        seim::set_config(c0.pack(), c1.pack());
+        reply("EXP rows_in_reset=%u rows_delay=%u -> t_exp=%lu PP (%lu us at %lu Hz)",
+              c0.rows_in_reset, c1.rows_delay,
+              (unsigned long)exposure_pp(c0.rows_in_reset, c1.rows_delay),
+              (unsigned long)((uint64_t)exposure_pp(c0.rows_in_reset, c1.rows_delay) *
+                              PP_BITS * 1000000ull / seim::sclk_hz()),
+              (unsigned long)seim::sclk_hz());
+    } else if (!strcmp(tok[0], "GAIN")) {
+        Config0 c0 = Config0::unpack(seim::config0());
+        Config1 c1 = Config1::unpack(seim::config1());
+        c0.ramp_gain = (uint8_t)parse_u32(tok[1], c0.ramp_gain) & 3;
+        if (n > 2) c1.cds_gain = (uint8_t)parse_u32(tok[2], c1.cds_gain) & 1;
+        seim::set_config(c0.pack(), c1.pack());
+        reply("GAIN ramp_gain=%u cds_gain=%u", c0.ramp_gain, c1.cds_gain);
+    } else if (!strcmp(tok[0], "REG")) {
+        const uint32_t addr = parse_u32(tok[1], 0);
+        const uint32_t val = parse_u32(tok[2], 0);
+        if (addr == 0) seim::set_config((uint16_t)val, seim::config1());
+        else seim::set_config(seim::config0(), (uint16_t)val);
+        reply("REG %lu = 0x%04X", (unsigned long)addr, (unsigned)val);
+    } else if (!strcmp(tok[0], "LED")) {
+        led::set_enabled(parse_u32(tok[1], 0) != 0);
+        reply("LED %d  current=%.2f mA (limit %.2f mA)", led::enabled() ? 1 : 0,
+              led::current_ma(), led::max_current_ma());
+    } else if (!strcmp(tok[0], "LEDI")) {
+        const float ma = tok[1] ? (float)atof(tok[1]) : 0.0f;
+        const float got = led::set_current_ma(ma);
+        reply("LEDI %.2f mA requested -> %.2f mA applied (code %u, limit %.2f mA)", ma, got,
+              led::code_for_current_ma(got), led::max_current_ma());
+    } else if (!strcmp(tok[0], "LEDMAX")) {
+        const float lim = led::set_max_current_ma(tok[1] ? (float)atof(tok[1]) : 0.0f);
+        reply("LEDMAX %.2f mA (hardware maximum %.2f mA)", lim, led::MAX_CURRENT_MA);
+    } else if (!strcmp(tok[0], "PROBE")) {
+        seim::SyncReport rep;
+        seim::probe_sync(rep, parse_u32(tok[1], 2));
+        reply("PROBE words=%lu 0x555=%lu 0xAAA=%lu 0x000=%lu pixel_like=%lu",
+              (unsigned long)rep.words, (unsigned long)rep.training_555,
+              (unsigned long)rep.training_AAA, (unsigned long)rep.zeros,
+              (unsigned long)rep.pixel_like);
+        reply("PROBE first: %03X %03X %03X %03X %03X %03X %03X %03X %03X %03X",
+              rep.first_words[0], rep.first_words[1], rep.first_words[2], rep.first_words[3],
+              rep.first_words[4], rep.first_words[5], rep.first_words[6], rep.first_words[7],
+              rep.first_words[8], rep.first_words[9]);
+    } else if (!strcmp(tok[0], "STATS")) {
+        reply("STATS frames=%lu sent=%lu dropped=%lu streaming=%d powered=%d",
+              (unsigned long)s_frame_counter, (unsigned long)s_frames_sent,
+              (unsigned long)s_frames_dropped, seim::streaming() ? 1 : 0,
+              seim::powered() ? 1 : 0);
+    } else if (!strcmp(tok[0], "SELFTEST")) {
+        selftest();
+    } else {
+        reply("unknown command '%s'. Try ID POWER CLK SAMPLE START STOP DEPTH EXP GAIN REG "
+              "LED LEDI LEDMAX PROBE STATS SELFTEST",
+              tok[0]);
+    }
+}
+
+// Accept either a bare ASCII line (so the port is usable from a terminal) or a framed
+// type-1 command packet. Device output is always framed.
+static void poll_commands() {
+    static char line[128];
+    static size_t len = 0;
+    while (Serial.available()) {
+        const int c = Serial.read();
+        if (c < 0) break;
+        if (c == '\r') continue;
+        if (c == '\n') {
+            line[len] = 0;
+            if (len) handle_command(line);
+            len = 0;
+        } else if (len < sizeof(line) - 1) {
+            line[len++] = (char)c;
+        } else {
+            len = 0;  // overlong line, discard
+        }
+    }
+}
+
+void setup() {
+    Serial.begin(115200);  // rate is ignored for USB CDC
+    proto::crc32_init();
+    led::begin();
+    seim::begin();
+}
+
+void loop() {
+    poll_commands();
+    tx_pump();
+
+    if (!s_run) {
+        delay(1);
+        return;
+    }
+
+    // raw12 needs 209,920 bytes and so borrows the whole region, leaving it single
+    // buffered. Wait for the previous frame to leave before capturing over it.
+    if (s_format == proto::FMT_RAW12 && s_tx.active) {
+        tx_pump();
+        return;
+    }
+    uint8_t* buf = (s_format == proto::FMT_RAW12) ? s_fb
+                                                  : (s_fb + (s_frame_counter & 1) * FB_SIZE);
+    seim::FrameInfo info;
+    const bool ok = seim::capture_frame(buf, s_format, info, tx_pump);
+    s_frame_counter++;
+
+    if (!ok) {
+        s_frames_dropped++;
+        proto::send_text(proto::TYPE_LOG, "capture failed, re-syncing (rows_failed=%lu)",
+                         (unsigned long)info.rows_failed);
+        s_run = seim::start();
+        return;
+    }
+
+    // A frame still in flight means the host could not keep up: drop this one rather than
+    // truncate, and account for it.
+    if (s_tx.active) {
+        s_frames_dropped++;
+        return;
+    }
+
+    const size_t payload = frame_payload_bytes(s_format);
+    proto::Header h;
+    proto::header_init(h, proto::TYPE_IMAGE, (uint32_t)payload);
+    h.frame_counter = s_frame_counter;
+    h.timestamp_us = info.timestamp_us;
+    h.width = (uint16_t)WIDTH;
+    h.height = (uint16_t)HEIGHT;
+    h.format = s_format;
+    h.flags = 0;
+    if (info.rows_failed) h.flags |= proto::FLAG_SYNC_LOST;
+    h.rows_failed = (uint16_t)(info.rows_failed > 0xFFFF ? 0xFFFF : info.rows_failed);
+    h.sclk_hz = seim::sclk_hz();
+    h.cfg0 = seim::config0();
+    h.cfg1 = seim::config1();
+    h.exposure_pp = exposure_pp(Config0::unpack(h.cfg0).rows_in_reset,
+                                Config1::unpack(h.cfg1).rows_delay);
+    h.frames_dropped = s_frames_dropped;
+    proto::header_finish(h, buf, payload);
+    tx_begin(h, buf);
+    s_frames_sent++;
+    tx_pump();
+}
