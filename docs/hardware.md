@@ -235,7 +235,12 @@ I_LED ≈ V_DAC / 56 Ω        0 → 44.6 mA, 10.9 µA per LSB
 
 !!! note "On/off alone gives you no light"
     The `-LZ12` part resets to **zero scale**, so `LED_VCC_ON` by itself yields ~0.18 mA.
-    The DAC has to be programmed: `LEDI 5` then `LED 1`.
+    The DAC has to be programmed: `LEDI 5` then `LED 1`. The GUI's *Illumination* panel
+    does this for you.
+
+The firmware and the GUI's LED controls are checked against the firmware's replies (the DAC
+codes match `I / 44.6 mA × 4095`), but the LEDs themselves have not been lit yet: pins 3–6
+and J2.9 are not wired on the bench.
 
 **Unresolved:** `R16` and `R17` are 0 Ω jumpers selecting the NIR and VIS strings. If both
 are fitted, the two strings share one current sink and the split follows their forward

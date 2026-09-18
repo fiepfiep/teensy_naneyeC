@@ -44,7 +44,7 @@ It is published to <https://fiepfiep.github.io/teensy_naneyeC/> by
 | Error handling | sampling point calibrated at every start; broken pixel words detected and concealed |
 | Exposure control | verified: brightness linear in exposure, 1.3 to 102 ms |
 | Watchdog | 2 s hardware watchdog, reset cause reported by `ID` |
-| Illumination (LED DAC) | implemented, not yet exercised on hardware |
+| Illumination (LED DAC) | firmware and GUI controls done; LEDs not wired on the bench yet |
 
 Three faults on the Teensy side hid first light: an uninvalidated D-cache over the DMA
 buffers, a datasheet start sequence that was unreliable on this board, and a too-short

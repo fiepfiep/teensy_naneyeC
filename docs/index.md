@@ -31,7 +31,7 @@ histogram.*
 | Error handling | sampling point measured at every start; broken pixel words detected and concealed |
 | Exposure control | verified: brightness follows exposure linearly from 1.3 to 102 ms |
 | Watchdog | hardware watchdog resets a hung Teensy within 2 s |
-| Illumination (the board's LEDs) | implemented, not yet tested on hardware |
+| Illumination (the board's LEDs) | firmware and GUI controls done; the LEDs are not wired on the bench yet |
 | Host software | PyQt6 camera GUI, recorder, Python API; 84 automated tests, no hardware needed |
 
 ## Where to go

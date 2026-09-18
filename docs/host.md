@@ -69,11 +69,32 @@ uv run python -m naneye.gui --snapshot gui.png                # screenshot after
 | **Acquisition** | Clock rate, Start, Stop, Pause, auto contrast, Save frame (16-bit PNG, raw values) |
 | **Exposure and gain** | Sliders for exposure, frame delay, ramp gain and CDS gain, each read out in real units (ms, fps, ×) |
 | **Analog settings** | Sliders for the six analog fields, amber when not at the datasheet's recommended value, and a *Datasheet recommended* button. Collapsible |
+| **Illumination** | The NanoBerry's LEDs: on/off, current in 0.1 mA steps with the DAC code it becomes, and the current ceiling (`LEDMAX`, default 20 mA, hardware maximum 44.6 mA). Switching on sends the current first, because the DAC powers up at zero |
 | **Registers** | Both registers decoded field by field; firmware-owned fields grey |
 | **Device** | Every command sent and every reply, including `START`'s sampling-point report |
 
 Under the image is a log-scaled histogram of the raw 10-bit values, with the auto-contrast
 window shaded.
+
+<figure markdown>
+![The whole control panel](images/gui-panel.png){ width="330" }
+<figcaption>The whole side panel, top to bottom. In the window it scrolls.</figcaption>
+</figure>
+
+| Key | Action |
+|---|---|
+| ++plus++ / ++minus++ | longer / shorter exposure |
+| ++r++ | datasheet-recommended analog settings |
+| ++l++ | LED on/off |
+| ++bracket-left++ / ++bracket-right++ | LED current ∓1 mA |
+| ++s++ | save the frame (16-bit PNG, raw 10-bit values) |
+| ++space++ | pause |
+| ++q++ | quit |
+
+The panels only ever show the device's own state or what was sent to it: the register table
+and the Link panel come from each frame's header, and every command and reply is in the
+Device log. The LED settings are the exception, because frames do not carry them; the GUI
+sends its LED state to the device when it starts, so the two cannot disagree.
 
 **How it keeps up.** A background thread owns the serial port and reads every packet as it
 arrives; the window paints the newest frame at up to 60 Hz. So a slow repaint skips frames
@@ -88,8 +109,8 @@ in the packet stream and are picked up by the reader thread. Nothing competes fo
 **Recovery.** If the serial port fails, because the Teensy was unplugged or its watchdog
 reset it, the link shows **RECONNECTING**. The reader closes the port and tries every second
 to open it again, first under its old name, then any Teensy. Once it is back, the camera is
-restarted and the slider settings are written back, since a reset device comes back with its
-default registers. If the port is fine but frames stop, the link shows **NO FRAMES** after
+restarted and the slider and LED settings are written back, since a reset device comes back
+with its defaults. If the port is fine but frames stop, the link shows **NO FRAMES** after
 2 s, and after 5 s the camera is restarted, unless *Stop* was pressed. Everything is logged
 in the *Device* panel.
 The device is started only once the window and its reader are running: started earlier, it

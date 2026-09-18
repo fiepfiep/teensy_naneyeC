@@ -100,6 +100,7 @@ the device's replies. [Host software](host.md#camera-gui) explains every part.
 |---|---|
 | ++plus++ / ++minus++ | longer / shorter exposure |
 | ++r++ | datasheet-recommended analog settings |
+| ++l++ | LED on/off (the *Illumination* panel sets the current) |
 | ++s++ | save the frame (16-bit PNG, raw 10-bit values) |
 | ++space++ | pause |
 | ++q++ | quit |

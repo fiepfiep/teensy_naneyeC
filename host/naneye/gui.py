@@ -10,7 +10,7 @@ over USB intact, "displayed" is what was painted. If painting falls behind, fram
 skipped for display only -- none are lost from reception.
 
 Keys: Space pause, S save frame, + / - exposure, R datasheet-recommended analog settings,
-      Q quit.
+      L LED on/off, [ / ] LED current -/+ 1 mA, Q quit.
 """
 
 from __future__ import annotations
@@ -34,6 +34,13 @@ CLOCKS = ((49500000, "49.5 MHz  (~35 fps)"), (24750000, "24.75 MHz  (~18 fps)"),
 SETTLE_S = 0.15          # a slider must be still this long before its value is sent
 NO_FRAMES_S = 2.0        # this long without a frame: show NO FRAMES
 RESTART_AFTER_S = 5.0    # ... and this long: restart the camera (unless Stop was pressed)
+# Illumination: LTC2630 DAC (12 bit, 2.5 V) into a 56 ohm sense resistor (docs/hardware.md).
+LED_MAX_MA = 2.5 / 56.0 * 1000.0   # 44.6 mA, the hardware ceiling
+LED_DEFAULT_LIMIT_MA = 20.0        # the firmware's default ceiling
+
+
+def led_code(ma: float) -> int:
+    return int(round(ma / LED_MAX_MA * 4095))
 ACCENT = "#4fa3ff"
 GOOD, BAD, WARN = "#3ecf8e", "#ff5c5c", "#ffb44f"
 
@@ -336,6 +343,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # The device is started only now, with the reader already running: started earlier,
         # it streams while the window is being built and drops frames nobody is reading.
         if self.device is not None:
+            QtCore.QTimer.singleShot(0, self._restore_led)
             QtCore.QTimer.singleShot(0, self._start)
 
     @property
@@ -365,6 +373,7 @@ class MainWindow(QtWidgets.QMainWindow):
         side.addWidget(self._acquisition_box(clock_hz))
         side.addWidget(self._exposure_box())
         side.addWidget(self._analog_box())
+        side.addWidget(self._led_box())
         side.addWidget(self._register_box())
         side.addWidget(self._log_box(), 1)
         scroll = QtWidgets.QScrollArea()
@@ -381,7 +390,10 @@ class MainWindow(QtWidgets.QMainWindow):
                         (Qt.Key.Key_Plus, lambda: self._nudge_exposure(-8)),
                         (Qt.Key.Key_Equal, lambda: self._nudge_exposure(-8)),
                         (Qt.Key.Key_Minus, lambda: self._nudge_exposure(8)),
-                        (Qt.Key.Key_R, self._recommended), (Qt.Key.Key_Q, self.close)):
+                        (Qt.Key.Key_R, self._recommended), (Qt.Key.Key_Q, self.close),
+                        (Qt.Key.Key_L, lambda: self.btn_led.toggle()),
+                        (Qt.Key.Key_BracketLeft, lambda: self._nudge_led(-1.0)),
+                        (Qt.Key.Key_BracketRight, lambda: self._nudge_led(1.0))):
             QtGui.QShortcut(QtGui.QKeySequence(key), self, activated=fn)
         self.resize(1180, 860)
 
@@ -483,6 +495,95 @@ class MainWindow(QtWidgets.QMainWindow):
         box.toggled.connect(lambda on: [w.setVisible(on) for w in analog + [btn]])
         return box
 
+    def _led_box(self):
+        """The NanoBerry's LEDs: on/off, current, and the current ceiling.
+
+        The DAC powers up at zero scale, so switching on sends the current first. Current
+        is set in 0.1 mA steps (the DAC's own step is 0.011 mA)."""
+        box = self._group("Illumination")
+        g = QtWidgets.QGridLayout(box)
+        self.btn_led = QtWidgets.QPushButton("LED off")
+        self.btn_led.setCheckable(True)
+        self.btn_led.toggled.connect(self._led_toggled)
+        self.led_limit = QtWidgets.QDoubleSpinBox()
+        self.led_limit.setRange(1.0, LED_MAX_MA)
+        self.led_limit.setDecimals(1)
+        self.led_limit.setSingleStep(1.0)
+        self.led_limit.setSuffix(" mA max")
+        self.led_limit.setValue(LED_DEFAULT_LIMIT_MA)
+        self.led_limit.setToolTip("Current ceiling (LEDMAX). Hardware maximum 44.6 mA")
+        self.led_limit.valueChanged.connect(self._led_limit_changed)
+        self.led_slider = QtWidgets.QSlider(Qt.Orientation.Horizontal)
+        self.led_slider.setRange(0, int(LED_DEFAULT_LIMIT_MA * 10))
+        self.led_slider.setValue(50)  # 5 mA
+        self.led_slider.valueChanged.connect(self._led_current_moved)
+        self.led_readout = QtWidgets.QLabel("")
+        self.led_readout.setObjectName("readout")
+        self.led_readout.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        note = QtWidgets.QLabel("VIS and NIR strings share one current sink; which are active "
+                                "depends on jumpers R16/R17.")
+        note.setObjectName("caption")
+        note.setWordWrap(True)
+        g.addWidget(self.btn_led, 0, 0)
+        g.addWidget(self.led_limit, 0, 1)
+        g.addWidget(QtWidgets.QLabel("Current"), 1, 0)
+        g.addWidget(self.led_readout, 1, 1)
+        g.addWidget(self.led_slider, 2, 0, 1, 2)
+        g.addWidget(note, 3, 0, 1, 2)
+        self.led_pending_since = None
+        self.led_sent_ma = None
+        self._update_led_readout()
+        for w in (self.btn_led, self.led_limit, self.led_slider):
+            w.setEnabled(self.device is not None)
+        return box
+
+    def _led_ma(self) -> float:
+        return self.led_slider.value() / 10.0
+
+    def _update_led_readout(self):
+        ma = self._led_ma()
+        self.led_readout.setText(f"{ma:.1f} mA  ·  DAC code {led_code(ma)}")
+
+    def _led_toggled(self, on: bool):
+        self.btn_led.setText("LED on" if on else "LED off")
+        if on:
+            self._send(f"LEDI {self._led_ma():.2f}")
+            self.led_sent_ma = self._led_ma()
+        self._send(f"LED {1 if on else 0}")
+
+    def _led_current_moved(self):
+        self._update_led_readout()
+        self.led_pending_since = time.monotonic()
+
+    def _led_limit_changed(self, limit: float):
+        self._send(f"LEDMAX {limit:.1f}")
+        self.led_slider.setMaximum(int(round(limit * 10)))  # also clamps the current
+        self._update_led_readout()
+
+    def _nudge_led(self, step_ma: float):
+        self.led_slider.setValue(self.led_slider.value() + int(step_ma * 10))
+
+    def _flush_led(self):
+        """Send a settled current change, like the register sliders."""
+        if self.led_pending_since is None:
+            return
+        if time.monotonic() - self.led_pending_since < SETTLE_S:
+            return
+        self.led_pending_since = None
+        if self._led_ma() != self.led_sent_ma:
+            self._send(f"LEDI {self._led_ma():.2f}")
+            self.led_sent_ma = self._led_ma()
+
+    def _restore_led(self):
+        """Make the device's LED state match the panel: at startup (the device keeps its
+        LED settings in RAM between sessions) and after a reconnect."""
+        self._send(f"LEDMAX {self.led_limit.value():.1f}")
+        if self.btn_led.isChecked():
+            self._send(f"LEDI {self._led_ma():.2f}")
+            self._send("LED 1")
+        else:
+            self._send("LED 0")
+
     def _register_box(self):
         box = self._group("Registers")
         v = QtWidgets.QVBoxLayout(box)
@@ -498,8 +599,12 @@ class MainWindow(QtWidgets.QMainWindow):
         hh.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         hh.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         hh.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self.table.verticalHeader().setDefaultSectionSize(20)
-        self.table.setFixedHeight(20 * len(regs.FIELDS) + 26)
+        vh = self.table.verticalHeader()
+        vh.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Fixed)
+        vh.setMinimumSectionSize(20)
+        vh.setDefaultSectionSize(20)
+        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.table.setFixedHeight(20 * len(regs.FIELDS) + 30)
         legend = QtWidgets.QLabel(f"<span style='color:{WARN}'>amber</span>: not the "
                                   "datasheet's recommended value · grey: set by the firmware")
         legend.setObjectName("caption")
@@ -537,6 +642,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_reconnected(self):
         self.log.appendPlainText("! restarting the camera after reconnecting")
+        self._restore_led()
         self._start(automatic=True)
 
     def _start(self, automatic: bool = False):
@@ -631,6 +737,7 @@ class MainWindow(QtWidgets.QMainWindow):
         while self.reader.log:
             self.log.appendPlainText(self.reader.log.popleft())
         self._flush_register_writes()
+        self._flush_led()
         frame = self.reader.take_latest()
         if frame is None or self.paused:
             return
@@ -765,8 +872,8 @@ QPushButton {{ background: #262b33; border: 1px solid #353b45; border-radius: 6p
 QPushButton:hover {{ border-color: {ACCENT}; }}
 QPushButton:checked {{ background: {ACCENT}; color: #0b1320; }}
 QPushButton:disabled, QComboBox:disabled {{ color: #5b626d; }}
-QComboBox {{ background: #262b33; border: 1px solid #353b45; border-radius: 6px;
-             padding: 4px 8px; }}
+QComboBox, QDoubleSpinBox {{ background: #262b33; border: 1px solid #353b45;
+                            border-radius: 6px; padding: 4px 8px; }}
 QSlider::groove:horizontal {{ height: 4px; background: #2c313a; border-radius: 2px; }}
 QSlider::sub-page:horizontal {{ background: {ACCENT}; border-radius: 2px; }}
 QSlider::handle:horizontal {{ background: #e5e7eb; width: 14px; margin: -6px 0;
