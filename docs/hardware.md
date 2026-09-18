@@ -265,7 +265,7 @@ and were not, is in [First light](#first-light-what-it-took-2026-09-18) below.
 ### M0 — before the camera is connected
 
 ```bash
-uv run pytest                                     # 73 tests
+uv run pytest                                     # 79 tests
 uv run --group firmware python -m platformio run -d firmware -t upload
 ```
 

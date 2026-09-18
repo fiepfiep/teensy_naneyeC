@@ -32,7 +32,7 @@ histogram.*
 | Exposure control | verified: brightness follows exposure linearly from 1.3 to 102 ms |
 | Watchdog | hardware watchdog resets a hung Teensy within 2 s |
 | Illumination (the board's LEDs) | implemented, not yet tested on hardware |
-| Host software | viewer, recorder, Python API; 73 automated tests, no hardware needed |
+| Host software | PyQt6 camera GUI, recorder, Python API; 79 automated tests, no hardware needed |
 
 ## Where to go
 
@@ -90,7 +90,7 @@ doc/                    NOT tracked: datasheets, schematic, reference capture
 firmware/               PlatformIO project for the Teensy 4.1
 host/naneye/            Python package: decoder, transport, viewer, recorder, Saleae client
 tools/                  reference-capture decoder, logic-analyser bring-up tools
-tests/                  73 tests, none needing hardware
+tests/                  79 tests, none needing hardware
 ```
 
 ## Building these docs

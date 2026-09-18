@@ -9,6 +9,7 @@ dependencies = [
     "pillow>=10.0",      # PNG output from the golden decoder
     "pyserial>=3.5",     # live device transport
     "opencv-python>=4.8",  # viewer
+    "pyqt6>=6.6",        # naneye.gui
 ]
 
 [project.optional-dependencies]
@@ -17,6 +18,7 @@ dependencies = [
 saleae = ["logic2-automation>=1.0.5"]
 
 [project.scripts]
+naneye-gui = "naneye.gui:main"
 naneye-view = "naneye.viewer:main"
 naneye-record = "naneye.record:main"
 

@@ -37,7 +37,7 @@ It is published to <https://fiepfiep.github.io/teensy_naneyeC/> by
 | | |
 |---|---|
 | Reference capture decoded | done: 7 frames, every start/stop bit valid |
-| Host decode, transport, recorder, viewer | done; 73 tests passing, no hardware required |
+| Host decode, transport, recorder, viewer | done; 79 tests passing, no hardware required |
 | Start-up and row lock | reliable: reference start sequence plus a bit-level row lock |
 | 49.5 MHz (default) | **35.3 fps**, 60 s with 0 failed rows and 0 concealed pixels ([how](docs/hardware.md#clock-rates)) |
 | 24.75 / 12.375 MHz | 17.9 / 8.4 fps, 0 failed rows |
@@ -68,7 +68,7 @@ firmware/               PlatformIO project for the Teensy 4.1
 host/naneye/            decoder, transport, sources, viewer, recorder, Saleae client
 tools/                  golden-capture decoder, test-vector generator, Saleae
                         bring-up tools (show_bringup, check_alignment, capture/analyze_link)
-tests/                  73 tests, no hardware required
+tests/                  79 tests, no hardware required
 ```
 
 ## The reference capture
@@ -93,7 +93,7 @@ The host side is managed with [uv](https://docs.astral.sh/uv/):
 ```bash
 uv sync                                    # create the environment from uv.lock
 uv run python tools/decode_golden.py       # decode the reference capture (~50 s first run)
-uv run pytest                              # 73 tests
+uv run pytest                              # 79 tests
 uv run --group firmware python -m platformio run -d firmware  # build the firmware
 ```
 
@@ -109,12 +109,14 @@ With hardware connected, swap `--source replay` for `--source auto`. Depth defau
 10-bit and the clock to 49.5 MHz (~35 fps):
 
 ```bash
-uv run python -m naneye.viewer --source auto
+uv run python -m naneye.gui                                    # camera GUI (PyQt6)
 uv run python -m naneye.record --source auto --frames 200 --out build/run1
 ```
 
-Viewer keys: `+`/`-` exposure, `h` histogram, `r` raw, `s` save, space pause, `q` quit.
-The viewer holds the COM port while it is open.
+The GUI shows the image, fps received and displayed, link errors and losses, sliders for
+exposure, gain and the analog settings, and the sensor's registers decoded. Keys: `+`/`-`
+exposure, `r` recommended settings, `s` save, space pause, `q` quit. It holds the COM port
+while it is open. `python -m naneye.viewer` is the older, lighter OpenCV viewer.
 
 Saleae capture automation is an optional extra: `uv sync --extra saleae`.
 

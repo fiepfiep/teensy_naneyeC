@@ -80,32 +80,29 @@ WATCHDOG` straight after flashing is normal.
 ## 5. See an image
 
 ```bash
-uv run python -m naneye.viewer --source auto
+uv run python -m naneye.gui
 ```
 
-This finds the Teensy, powers the sensor, starts it at 49.5 MHz (about 35 frames per
-second; add `--clock 24750000` or `--clock 12375000` for slower rates) and opens two
-windows: the image, with
-the sensor's registers decoded beside it, and **NanEyeC controls**, with sliders for
-exposure, frame delay, gain and the analog settings. Starting takes about a second, because
-the sensor is powered off for 1 s first to guarantee a clean reset.
+This finds the Teensy, opens the camera window, then powers the sensor and starts it at
+49.5 MHz, about 35 frames per second. The clock can be changed in the window. Starting
+takes about a second, because the sensor is powered off for 1 s first to guarantee a clean
+reset.
+
+![The camera GUI](images/gui.png)
+
+The **Link** panel is the one to watch. *fps received* is what arrives over USB intact;
+*fps displayed* is what the window paints. *Failed rows*, *concealed px*, *lost on PC* and
+*dropped by device* should all stay at 0. The panels below have sliders for exposure,
+frame delay, gain and the analog settings, a decoded table of the sensor's registers, and
+the device's replies. [Host software](host.md#camera-gui) explains every part.
 
 | Key | Action |
 |---|---|
 | ++plus++ / ++minus++ | longer / shorter exposure |
-| ++h++ | histogram on/off |
-| ++g++ | register panel on/off |
-| ++d++ | datasheet-recommended analog settings |
-| ++r++ | raw vs auto-scaled contrast |
-| ++s++ | save the frame as PNG |
+| ++r++ | datasheet-recommended analog settings |
+| ++s++ | save the frame (16-bit PNG, raw 10-bit values) |
 | ++space++ | pause |
 | ++q++ | quit |
-
-[Host software](host.md#controls) explains every slider.
-
-The line under the image to watch is `dropped … counter gaps … rows_failed`. `rows_failed`
-should stay at 0. A few dropped frames mean the PC did not keep up; they are counted, never
-silently lost.
 
 **No camera yet?** `--source replay` plays back real frames from the reference capture, or
 synthetic ones if you do not have it, through exactly the same code path.

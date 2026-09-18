@@ -51,7 +51,47 @@ with open_source("replay", fps=19.3) as src:
         print(header.describe(), img.shape, img.dtype)
 ```
 
-## Viewer
+## Camera GUI
+
+The main way to look at the camera: a PyQt6 application.
+
+```bash
+uv run python -m naneye.gui                                   # live camera, 49.5 MHz
+uv run python -m naneye.gui --source replay                   # no camera needed
+uv run python -m naneye.gui --snapshot gui.png                # screenshot after 4 s, then exit
+```
+
+![The camera GUI](images/gui.png)
+
+| Panel | What it shows |
+|---|---|
+| **Link** | *fps received*: frames that arrived over USB intact, per second. *fps displayed*: frames painted. Link lock state, *failed rows*, *concealed px*, *lost on PC* (left the device, never arrived intact), *dropped by device* (skipped by the firmware because the PC had not taken the previous frame yet), frame counter, SCLK |
+| **Acquisition** | Clock rate, Start, Stop, Pause, auto contrast, Save frame (16-bit PNG, raw values) |
+| **Exposure and gain** | Sliders for exposure, frame delay, ramp gain and CDS gain, each read out in real units (ms, fps, ×) |
+| **Analog settings** | Sliders for the six analog fields, amber when not at the datasheet's recommended value, and a *Datasheet recommended* button. Collapsible |
+| **Registers** | Both registers decoded field by field; firmware-owned fields grey |
+| **Device** | Every command sent and every reply, including `START`'s sampling-point report |
+
+Under the image is a log-scaled histogram of the raw 10-bit values, with the auto-contrast
+window shaded.
+
+**How it keeps up.** A background thread owns the serial port and reads every packet as it
+arrives; the window paints the newest frame at up to 60 Hz. So a slow repaint skips frames
+*on screen* only, never in reception. The two fps figures make that visible, and the frame
+accounting makes loss visible: a gap in the frame counter that the device's header accounts
+for is *dropped by device*, anything else is *lost on PC*. Measured at 49.5 MHz: 35.5 fps
+received, 35.5 displayed, nothing lost or dropped over 45 s.
+
+Commands are only ever written from the window (`Device.command()`); their replies arrive
+in the packet stream and are picked up by the reader thread. Nothing competes for the port.
+The device is started only once the window and its reader are running: started earlier, it
+streamed while the window was being built and dropped frames nobody was reading (124 of
+them, in the measurement that found this).
+
+## Lightweight viewer
+
+The original OpenCV viewer is still there. It has fewer controls, and at 35 fps it cannot
+always keep up, but it needs no Qt.
 
 ```bash
 uv run python -m naneye.viewer --source auto                           # live camera, 49.5 MHz
@@ -255,7 +295,7 @@ Diagnostic commands (`LISTEN`, `PROBE`, `START REF`, `START AN`, `ALIGN`, `CLKME
 ## Tests
 
 ```bash
-uv run pytest          # 73 tests, none needing hardware
+uv run pytest          # 79 tests, none needing hardware
 ```
 
 | File | Covers |
@@ -267,6 +307,7 @@ uv run pytest          # 73 tests, none needing hardware
 | `test_sources.py` | replay path resolution, the synthetic fallback, lossless replay round-trip |
 | `test_device.py` | the `Device` command/reply logic against a simulated serial port |
 | `test_regs.py` | the register model: field layout, round trips, exposure maths against the firmware and the device |
+| `test_gui.py` | the Qt GUI, headless: loss accounting (device drops vs PC losses), frame hand-over, and a smoke test on replayed frames |
 | `test_link_quality.py` | the link-quality analysis: alignment search, framing-error counting, and the limit that data-bit errors are invisible |
 
 Tests needing the 434 MB capture skip cleanly when it is absent. `test_unpack.py` parses the
