@@ -116,6 +116,14 @@ static inline void sdat_hiz() { pinMode(board::PIN_SDAT_OUT, INPUT_PULLDOWN); }
 // following rising edge, which measured 24 ns of setup at 31.25 MHz (spec.md section 3.1).
 static inline uint32_t tcr_base() { return 0; }
 
+// Receive-side sampling edge. CPHA=1 makes LPSPI sample on the falling edge, half a period
+// earlier than the rising edge, so together with CFGR1[SAMPLE] the receiver has four
+// sampling points to choose from. Only transfers that receive use it: register writes must
+// keep CPHA=0, because the sensor captures SDAT on the rising edge.
+static bool s_rx_cpha = false;
+constexpr uint32_t TCR_CPHA = 1u << 30;
+static inline uint32_t tcr_rx() { return tcr_base() | (s_rx_cpha ? TCR_CPHA : 0u); }
+
 static inline bool wait_frame() {
     uint32_t guard = 0;
     while (!(LPSPI.SR & reg::SR_FCF)) {
@@ -170,14 +178,16 @@ static inline bool send24(uint32_t word) {
 }
 
 // Start a row transfer: 3936 clocks, output masked, received words DMA'd into buf.
-static inline void start_row(uint32_t* buf) {
+// Receive `bits` clocks (a multiple of 32, at most one row) into buf by DMA.
+static inline void start_rx(uint32_t* buf, uint32_t bits) {
     // Drop any cached copy first, so no line can be evicted over the DMA's data.
     arm_dcache_delete(buf, sizeof(s_row[0]));
     s_row_pending = buf;
-    s_rx.destinationBuffer(buf, ROW_WORDS * 4);
+    s_rx.destinationBuffer(buf, bits / 8);
     s_rx.enable();
-    LPSPI.TCR = tcr_base() | reg::framesz(ROW_BITS) | reg::TCR_TXMSK;
+    LPSPI.TCR = tcr_rx() | reg::framesz(bits) | reg::TCR_TXMSK;
 }
+static inline void start_row(uint32_t* buf) { start_rx(buf, ROW_BITS); }
 
 static inline bool wait_row() {
     uint32_t guard = 0;
@@ -395,6 +405,17 @@ void set_delayed_sample(bool on) {
 
 bool delayed_sample() { return s_delayed_sample; }
 
+void set_rx_phase(bool falling) { s_rx_cpha = falling; }
+bool rx_phase() { return s_rx_cpha; }
+
+// Schmitt-trigger input on the receive pin (IOMUXC pad HYS). Slow, capacitively loaded edges
+// at the higher clock rates are where it might matter.
+void set_input_hysteresis(bool on) {
+    volatile uint32_t* pad = portControlRegister(board::PIN_SDAT_IN);
+    *pad = on ? (*pad | IOMUXC_PAD_HYS) : (*pad & ~IOMUXC_PAD_HYS);
+}
+bool input_hysteresis() { return (*portControlRegister(board::PIN_SDAT_IN) & IOMUXC_PAD_HYS) != 0; }
+
 void set_align_clocks(uint32_t n) { s_align_clocks = n; }
 uint32_t align_clocks() { return s_align_clocks; }
 
@@ -414,7 +435,7 @@ uint16_t config1() { return s_cfg1; }
 static bool receive_one_pp(uint16_t& out) {
     LPSPI.DER = 0;                         // keep this word out of the row DMA
     LPSPI.CR = reg::CR_MEN | reg::CR_RRF;  // nothing stale in the RX FIFO
-    LPSPI.TCR = tcr_base() | reg::framesz(PP_BITS) | reg::TCR_TXMSK;
+    LPSPI.TCR = tcr_rx() | reg::framesz(PP_BITS) | reg::TCR_TXMSK;
     bool ok = wait_frame();
     uint32_t guard = 0;
     while (ok && (LPSPI.RSR & reg::RSR_RXEMPTY)) {
@@ -549,6 +570,74 @@ static inline uint32_t row_bit(const uint32_t* w, uint32_t i) {
     return (w[i >> 5] >> (31u - (i & 31u))) & 1u;
 }
 
+// --- Sampling-point calibration --------------------------------------------------------
+// Where in each bit the receiver samples decides whether the link works at all at the
+// higher clock rates. The sensor launches a bit ~10 ns after the SCLK edge reaches it, and
+// the edge and the data both cross the wiring, so at 49.5 MHz (20 ns bits) the round trip
+// is a large fraction of a bit: sampling on the rising edge landed on the transition (79 %
+// of words corrupt), on the falling edge in the middle of the bit (no errors in 420,000
+// words). At 12.375 MHz every point works. Measured with tools/link_quality.py.
+//
+// So START measures instead of assuming. Straight after SDAT is released the sensor sends
+// ~12,000 bits of pure alternating training pattern: a known signal, and the hardest one
+// for the link. Each of the four sampling points (rising or falling edge, with or without
+// CFGR1[SAMPLE]'s extra delay) receives CAL_BITS of it, and the one with the fewest breaks
+// in the alternation wins; ties go to the earlier entry in SAMPLE_POINTS. This uses about
+// a third of the training, which is thrown away anyway, and leaves plenty for the row lock.
+struct SamplePoint {
+    bool delayed;
+    bool falling;
+};
+static constexpr SamplePoint SAMPLE_POINTS[4] = {
+    {false, false},  // rising edge: the reference host's choice, proven at <= 24.75 MHz
+    {false, true},   // falling edge: the only clean point at 49.5 MHz on the bench wiring
+    {true, false},   // rising edge + one LPSPI clock
+    {true, true},    // falling edge + one LPSPI clock
+};
+static constexpr uint32_t CAL_BITS = 1024;
+static constexpr uint32_t VERIFY_ROWS = 8;
+static bool s_auto_sample = true;
+static SampleCal s_cal = {};
+
+static void apply_sample_point(const SamplePoint& p) {
+    s_rx_cpha = p.falling;
+    if (s_delayed_sample != p.delayed) {
+        s_delayed_sample = p.delayed;
+        configure_lpspi();
+    }
+}
+
+// Breaks in what should be a perfectly alternating bit stream.
+static uint32_t alternation_errors(const uint32_t* w, uint32_t bits) {
+    uint32_t errors = 0;
+    for (uint32_t i = 0; i + 1 < bits; i++)
+        if (row_bit(w, i) == row_bit(w, i + 1)) errors++;
+    return errors;
+}
+
+static bool calibrate_sampling() {
+    s_cal.automatic = s_auto_sample;
+    if (!s_auto_sample) return true;
+    uint32_t best = 0;
+    for (uint32_t k = 0; k < 4; k++) {
+        apply_sample_point(SAMPLE_POINTS[k]);
+        start_rx(s_row[0], CAL_BITS);
+        if (!wait_row()) {
+            s_rx.disable();
+            return false;
+        }
+        s_cal.errors[k] = alternation_errors(s_row[0], CAL_BITS);
+        if (s_cal.errors[k] < s_cal.errors[best]) best = k;
+    }
+    s_cal.choice = (uint8_t)best;
+    apply_sample_point(SAMPLE_POINTS[best]);
+    return true;
+}
+
+const SampleCal& sample_calibration() { return s_cal; }
+void set_auto_sample(bool on) { s_auto_sample = on; }
+bool auto_sample() { return s_auto_sample; }
+
 // Find the first frame's row phase in the received bits and move the transfers onto it,
 // then discard the rest of that frame, leaving the link at the start of INTERFACE MODE.
 //
@@ -587,8 +676,25 @@ static bool lock_row_phase() {
                         return false;
                     }
                     if (count_training(s_row[0], WORD_TRAINING) < TRAINING_PP) return false;
-                    // Rest of the frame: the rows after this one, then EOF.
-                    return clock_pp_discard((HEIGHT - 1 - next_row) * ROW_PP + EOF_PP);
+                    // The first frame is thrown away, so use some of it to check the
+                    // chosen sampling point on real pixel data before trusting it.
+                    const uint32_t verify = VERIFY_ROWS < HEIGHT - 1 - next_row
+                                                ? VERIFY_ROWS : HEIGHT - 1 - next_row;
+                    s_cal.verify_rows = verify;
+                    s_cal.verify_bad_words = 0;
+                    for (uint32_t v = 0; v < verify; v++) {
+                        start_row(s_row[0]);
+                        if (!wait_row()) {
+                            s_rx.disable();
+                            return false;
+                        }
+                        uint16_t px[WIDTH];
+                        s_cal.verify_bad_words += extract_row(s_row[0], px) +
+                            (TRAINING_PP - count_training(s_row[0], WORD_TRAINING));
+                    }
+                    // Rest of the frame: the remaining rows, then EOF.
+                    return clock_pp_discard((HEIGHT - 1 - next_row - verify) * ROW_PP +
+                                            EOF_PP);
                 }
                 if (run >= 1000) seen_long = true;
                 run = 0;
@@ -635,6 +741,10 @@ static bool start_like_reference(Config1 c1, bool require_sensor) {
     if (!send24(reg_write_packet(1, cfg1_run))) return false;
     if (!drive_zeros(INTERFACE_BITS - 2 * REG_WRITE_BITS)) return false;
     sdat_hiz();
+
+    // Choose where in each bit to sample, on the training pattern now arriving.
+    s_cal.verify_rows = 0;
+    if (!calibrate_sampling()) return false;
 
     // First training row: the "is there a sensor at all?" check.
     start_row(s_row[0]);
@@ -729,6 +839,31 @@ void stop() {
 
 bool streaming() { return s_streaming; }
 
+// Fault injection (INJECT): corrupt this many random pixel words per frame after they have
+// been received, as a real bit error would -- start bit knocked out, data scrambled -- so
+// detection, concealment and the counters can be exercised on a clean link.
+static uint32_t s_inject_per_frame = 0;
+static uint32_t s_rng = 0x2545F491u;
+static inline uint32_t xorshift() {
+    s_rng ^= s_rng << 13;
+    s_rng ^= s_rng >> 17;
+    s_rng ^= s_rng << 5;
+    return s_rng;
+}
+void set_inject(uint32_t per_frame) { s_inject_per_frame = per_frame; }
+
+static bool s_conceal = true;
+void set_conceal(bool on) { s_conceal = on; }
+bool conceal() { return s_conceal; }
+uint32_t inject() { return s_inject_per_frame; }
+
+static void inject_errors(uint32_t* row) {
+    const uint32_t n = s_inject_per_frame / HEIGHT +
+                       ((xorshift() % HEIGHT) < s_inject_per_frame % HEIGHT ? 1u : 0u);
+    for (uint32_t k = 0; k < n; k++)
+        set_pp(row, TRAINING_PP + xorshift() % WIDTH, (uint16_t)(xorshift() & 0x7FEu));
+}
+
 bool capture_frame(uint8_t* dst, uint8_t format, FrameInfo& info, IdleFn idle) {
     memset(&info, 0, sizeof(info));
 
@@ -754,15 +889,19 @@ bool capture_frame(uint8_t* dst, uint8_t format, FrameInfo& info, IdleFn idle) {
         // Arm the next row first, then do the slow work while it is in flight.
         if (r + 1 < HEIGHT) start_row(s_row[(r + 1) & 1]);
 
+        if (s_inject_per_frame) inject_errors(cur);
         bool row_bad = count_training(cur, expect) < TRAINING_PP;
         uint8_t* out = dst + (size_t)r * row_bytes;
         uint32_t bad;
+        uint32_t concealed = 0;
         switch (format) {
-            case 1: bad = unpack_row_gray10(cur, out); break;
+            case 1: bad = unpack_row_gray10(cur, out, &concealed, s_conceal); break;
             case 2: bad = unpack_row_raw12(cur, out); break;
-            default: bad = unpack_row_gray8(cur, out); break;
+            default: bad = unpack_row_gray8(cur, out, &concealed, s_conceal); break;
         }
         info.pixels_failed += bad;
+        info.pixels_concealed += concealed;
+        if (row_bad) info.rows_sync_lost++;
         if (bad || row_bad) info.rows_failed++;
         if (idle) idle();
     }

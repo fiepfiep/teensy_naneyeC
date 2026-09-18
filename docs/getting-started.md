@@ -80,10 +80,12 @@ WATCHDOG` straight after flashing is normal.
 ## 5. See an image
 
 ```bash
-uv run python -m naneye.viewer --source auto --clock 24750000
+uv run python -m naneye.viewer --source auto
 ```
 
-This finds the Teensy, powers the sensor, starts it and opens two windows: the image, with
+This finds the Teensy, powers the sensor, starts it at 49.5 MHz (about 35 frames per
+second; add `--clock 24750000` or `--clock 12375000` for slower rates) and opens two
+windows: the image, with
 the sensor's registers decoded beside it, and **NanEyeC controls**, with sliders for
 exposure, frame delay, gain and the analog settings. Starting takes about a second, because
 the sensor is powered off for 1 s first to guarantee a clean reset.
@@ -111,7 +113,7 @@ synthetic ones if you do not have it, through exactly the same code path.
 ## 6. Record
 
 ```bash
-uv run python -m naneye.record --source auto --clock 24750000 --frames 200 --out capture/run1
+uv run python -m naneye.record --source auto --frames 200 --out capture/run1
 ```
 
 This writes `frames.npy` (all frames, 10-bit values in `uint16`), `meta.csv` (one line per
@@ -128,7 +130,7 @@ from naneye.transport import Device
 
 with Device.open_first() as dev:
     print(dev.ask("ID"))
-    print(dev.ask("CLK 24750000"))
+    print(dev.ask("CLK 49500000"))
     print(dev.ask("START"))          # powers and starts the sensor
     print(dev.ask("EXP 80"))         # shorter exposure
     for pkt in dev.frames():         # image packets, each with its own header
@@ -147,7 +149,8 @@ script, and the other way round.
 | `no Teensy serial port found` | Firmware not flashed, or a charge-only USB cable |
 | `could not open port … Access is denied` | Another program (the viewer, a serial monitor, Arduino IDE) has the port open |
 | `START failed: pre-sync training pattern 0/328 … No sensor answering` | The sensor is not powered or not connected: check pin 2 → J2.33, 5 V and ground, and that SDAT goes to J2.19 |
-| `START failed: sensor answers … but could not lock onto its rows` | The sensor answers but its data arrives damaged: wiring too long or too loose for this clock. Use `--clock 12375000`, shorten the SDAT wire, add a ground next to it |
+| `START failed: sensor answers … but could not lock onto its rows` | The sensor answers but its data arrives damaged at every sampling point the Teensy can choose; the `START sampling:` line shows how each fared. Try `--clock 24750000`, shorten the SDAT wire, add a ground next to it |
+| `concealed` above 0 while streaming | Some pixel words arrived with broken framing and were replaced by their neighbours' mean. Occasional ones are harmless; a steady stream means the link is marginal: same remedies |
 | `rows_failed` above 0 while streaming | Intermittent signal-integrity problem, same remedies. Frames with failed rows are flagged, not hidden |
 | Image very dark or all white | Exposure. Press ++minus++ / ++plus++, or send `EXP 0` (longest) … `EXP 159` (shortest). Or something is in front of a 1 mm² lens, which takes remarkably little; it happened while these docs were being written |
 | Lots of `dropped` frames | The PC is not reading fast enough: close other programs, or record rather than view |

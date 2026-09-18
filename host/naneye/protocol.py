@@ -29,6 +29,7 @@ FMT_RAW12 = 2
 FLAG_SYNC_LOST = 1 << 0
 FLAG_CLOCK_GAP = 1 << 1
 FLAG_FIRST_DISCARDED = 1 << 2
+FLAG_CONCEALED = 1 << 3
 
 HEADER_FMT = "<IBBHIIIHHBBHIIHHIII"
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
@@ -61,7 +62,7 @@ class Header:
     cfg0: int = 0
     cfg1: int = 0
     frames_dropped: int = 0
-    reserved: int = 0
+    pixels_concealed: int = 0   # corrupt pixels replaced by their neighbours' mean
     crc32: int = 0
 
     def pack(self) -> bytes:
@@ -69,7 +70,7 @@ class Header:
             HEADER_FMT, self.magic, self.version, self.type, self.header_len,
             self.payload_len, self.frame_counter, self.timestamp_us, self.width,
             self.height, self.format, self.flags, self.rows_failed, self.sclk_hz,
-            self.exposure_pp, self.cfg0, self.cfg1, self.frames_dropped, self.reserved,
+            self.exposure_pp, self.cfg0, self.cfg1, self.frames_dropped, self.pixels_concealed,
             self.crc32)
 
     @classmethod
@@ -102,7 +103,8 @@ class Header:
                 f"{self.format_name} {self.payload_len}B "
                 f"t={self.timestamp_us / 1e6:.3f}s exp={self.exposure_us() / 1000:.2f}ms "
                 f"sclk={self.sclk_hz / 1e6:.3f}MHz cfg=0x{self.cfg0:04X}/0x{self.cfg1:04X} "
-                f"dropped={self.frames_dropped} rows_failed={self.rows_failed}")
+                f"dropped={self.frames_dropped} rows_failed={self.rows_failed} "
+                f"concealed={self.pixels_concealed}")
 
 
 def compute_crc(header_bytes: bytes, payload: bytes) -> int:

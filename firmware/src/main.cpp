@@ -133,12 +133,53 @@ static void selftest() {
           (unsigned long)bad, (unsigned long)mismatches, (unsigned long)training,
           (bad == 0 && mismatches == 0 && training == 8) ? "PASS" : "FAIL");
 
+    // Concealment: break one word of the golden row and check it is replaced by the mean of
+    // its neighbours, and that nothing else changes.
+    {
+        uint32_t row[ROW_WORDS_PADDED];
+        memcpy(row, golden::ROW_WORDS_DATA, sizeof(row));
+        const uint32_t victim = 100;
+        set_pp(row, TRAINING_PP + victim, 0x7FE);  // start bit 0: framing broken
+        uint16_t px[WIDTH];
+        uint32_t concealed = 0;
+        const uint32_t bad2 = extract_row(row, px, &concealed);
+        const uint16_t want = (uint16_t)((golden::EXPECTED_PIXELS[victim - 1] +
+                                          golden::EXPECTED_PIXELS[victim + 1] + 1u) / 2u);
+        uint32_t others = 0;
+        for (uint32_t i = 0; i < WIDTH; i++)
+            if (i != victim && px[i] != golden::EXPECTED_PIXELS[i]) others++;
+        reply("SELFTEST conceal: bad=%lu concealed=%lu pixel=%u (expect %u) others changed=%lu"
+              " -> %s",
+              (unsigned long)bad2, (unsigned long)concealed, px[victim], want,
+              (unsigned long)others,
+              (bad2 == 1 && concealed == 1 && px[victim] == want && others == 0) ? "PASS"
+                                                                                  : "FAIL");
+    }
+
     // Exposure maths against the values decoded from the reference capture.
     const uint32_t e1 = exposure_pp(0, 0);
     const uint32_t e2 = exposure_pp(127, 0);
     reply("SELFTEST exposure: rir=0 -> %lu PP (expect 105616), rir=127 -> %lu PP (expect 22304) -> %s",
           (unsigned long)e1, (unsigned long)e2,
           (e1 == 105616u && e2 == 22304u) ? "PASS" : "FAIL");
+}
+
+// What START measured about the sampling point, and how the first frame checked out.
+static void report_sampling() {
+    static const char* const NAMES[4] = {"rise", "fall", "rise+d", "fall+d"};
+    const seim::SampleCal& c = seim::sample_calibration();
+    if (c.automatic) {
+        reply("START sampling: training breaks per 1023 bits  rise %lu  fall %lu  rise+d %lu"
+              "  fall+d %lu  -> %s",
+              (unsigned long)c.errors[0], (unsigned long)c.errors[1],
+              (unsigned long)c.errors[2], (unsigned long)c.errors[3], NAMES[c.choice]);
+    } else {
+        reply("START sampling: manual (SAMPLE %d PHASE %d)", seim::delayed_sample() ? 1 : 0,
+              seim::rx_phase() ? 1 : 0);
+    }
+    if (c.verify_rows)
+        reply("START check: %lu rows of the discarded first frame, %lu bad words",
+              (unsigned long)c.verify_rows, (unsigned long)c.verify_bad_words);
 }
 
 // LISTEN's work, shared with START REF so the two can run back to back with no gap in the
@@ -227,8 +268,36 @@ static void handle_command(char* line) {
                       " next interface window, so one frame will be mismatched)"
                     : "");
     } else if (!strcmp(tok[0], "SAMPLE")) {
-        seim::set_delayed_sample(parse_u32(tok[1], 0) != 0);
-        reply("SAMPLE %d", seim::delayed_sample() ? 1 : 0);
+        if (n > 1) {
+            seim::set_delayed_sample(parse_u32(tok[1], 0) != 0);
+            seim::set_auto_sample(false);
+        }
+        reply("SAMPLE %d%s", seim::delayed_sample() ? 1 : 0,
+              seim::auto_sample() ? "" : "  (automatic calibration off: CAL 1 to restore)");
+    } else if (!strcmp(tok[0], "INJECT")) {
+        if (n > 1) seim::set_inject(parse_u32(tok[1], 0));
+        reply("INJECT %lu corrupt pixel words per frame (test hook; 0 = off)",
+              (unsigned long)seim::inject());
+    } else if (!strcmp(tok[0], "CONCEAL")) {
+        if (n > 1) seim::set_conceal(parse_u32(tok[1], 1) != 0);
+        reply("CONCEAL %d  (%s)", seim::conceal() ? 1 : 0,
+              seim::conceal() ? "corrupt pixels replaced by their neighbours' mean"
+                              : "corrupt pixels left as received");
+    } else if (!strcmp(tok[0], "CAL")) {
+        if (n > 1) seim::set_auto_sample(parse_u32(tok[1], 1) != 0);
+        reply("CAL %d  (%s)", seim::auto_sample() ? 1 : 0,
+              seim::auto_sample() ? "START measures and picks the sampling point"
+                                  : "START uses SAMPLE and PHASE as set");
+    } else if (!strcmp(tok[0], "PHASE")) {
+        if (n > 1) {
+            seim::set_rx_phase(parse_u32(tok[1], 0) != 0);
+            seim::set_auto_sample(false);
+        }
+        reply("PHASE %d (receive on the %s SCLK edge)", seim::rx_phase() ? 1 : 0,
+              seim::rx_phase() ? "falling" : "rising");
+    } else if (!strcmp(tok[0], "HYS")) {
+        if (n > 1) seim::set_input_hysteresis(parse_u32(tok[1], 0) != 0);
+        reply("HYS %d", seim::input_hysteresis() ? 1 : 0);
     } else if (!strcmp(tok[0], "START")) {
         if (n > 1 && !strcasecmp(tok[1], "REF")) {
             // START REF [rows]: with rows, listen straight away, with no gap in the clock.
@@ -260,6 +329,7 @@ static void handle_command(char* line) {
             reply("START ok  streaming  (pre-sync training %lu/%u)%s",
                   (unsigned long)seim::presync_training(), (unsigned)ROW_PP,
                   s_force_start ? "  FORCED: frames are not from a verified sensor" : "");
+            report_sampling();
         } else {
             s_run = false;
             const uint32_t training = seim::presync_training();
@@ -273,9 +343,11 @@ static void handle_command(char* line) {
                 // the training pattern survives the link while pixel data does not.
                 reply("START failed: sensor answers (pre-sync training %lu/%u) but could not "
                       "lock onto its rows: pixel data is not arriving intact. Signal "
-                      "integrity at this clock? Try a lower CLK, or SAMPLE 1.",
+                      "integrity at this clock? Try a lower CLK; the sampling report below "
+                      "shows how each sampling point fared.",
                       (unsigned long)training, (unsigned)ROW_PP);
             }
+            report_sampling();
         }
     } else if (!strcmp(tok[0], "STOP")) {
         s_run = false;
@@ -476,7 +548,11 @@ void loop() {
     h.height = (uint16_t)HEIGHT;
     h.format = s_format;
     h.flags = 0;
-    if (info.rows_failed) h.flags |= proto::FLAG_SYNC_LOST;
+    // SYNC_LOST means the row phase itself is in doubt (training words wrong); isolated
+    // corrupt pixels are CONCEALED instead, and both still count in rows_failed.
+    if (info.rows_sync_lost) h.flags |= proto::FLAG_SYNC_LOST;
+    if (info.pixels_concealed) h.flags |= proto::FLAG_CONCEALED;
+    h.pixels_concealed = info.pixels_concealed;
     h.rows_failed = (uint16_t)(info.rows_failed > 0xFFFF ? 0xFFFF : info.rows_failed);
     h.sclk_hz = seim::sclk_hz();
     h.cfg0 = seim::config0();

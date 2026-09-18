@@ -12,14 +12,14 @@ EXPECTED_OFFSETS = {
     "magic": 0, "version": 4, "type": 5, "header_len": 6, "payload_len": 8,
     "frame_counter": 12, "timestamp_us": 16, "width": 20, "height": 22, "format": 24,
     "flags": 25, "rows_failed": 26, "sclk_hz": 28, "exposure_pp": 32, "cfg0": 36,
-    "cfg1": 38, "frames_dropped": 40, "reserved": 44, "crc32": 48,
+    "cfg1": 38, "frames_dropped": 40, "pixels_concealed": 44, "crc32": 48,
 }
 
 FIELD_SIZES = {
     "magic": 4, "version": 1, "type": 1, "header_len": 2, "payload_len": 4,
     "frame_counter": 4, "timestamp_us": 4, "width": 2, "height": 2, "format": 1,
     "flags": 1, "rows_failed": 2, "sclk_hz": 4, "exposure_pp": 4, "cfg0": 2, "cfg1": 2,
-    "frames_dropped": 4, "reserved": 4, "crc32": 4,
+    "frames_dropped": 4, "pixels_concealed": 4, "crc32": 4,
 }
 
 

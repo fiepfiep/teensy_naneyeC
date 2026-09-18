@@ -17,8 +17,9 @@ is shorter; this page is the full story behind it. Unfamiliar terms are in the
 | Red box at the back | **Saleae Logic Pro 16** logic analyser. Its leads with white tips probe the Teensy side of the link and, clipped to the small header on top of the NanoBerry (`P1`), the sensor side. Development only; the camera runs without it |
 | Red, black and green binding posts | Part of the breadboard, unused |
 
-It is deliberately an ordinary breadboard build: jumper wires, no custom PCB. That is also
-what limits the clock to 24.75 MHz ([clock rates](#clock-rates)).
+It is deliberately an ordinary breadboard build: jumper wires, no custom PCB. It still runs
+at the full 49.5 MHz, because the firmware measures where to sample each bit
+([clock rates](#clock-rates)).
 
 ## What is on the bench
 
@@ -187,8 +188,9 @@ mode does not give that for free.
 **The cost** is one extra wire and roughly 5 pF of pad capacitance on a node that already
 carries C13's 15 pF plus connector stubs, in a setup window measured at only ~12 ns at
 49.5 MHz — plus a short T-stub between the two pins and the header. Irrelevant at
-12–25 MHz, a real consideration at 49.5 MHz. That is why single-pin would be the right
-choice for a final design, and one of the things to try before attempting 49.5 MHz again.
+12–25 MHz, a consideration at 49.5 MHz. 49.5 MHz turned out to work with both pins, once
+the sampling point was chosen by measurement; single-pin would still be the tidier choice
+for a final design.
 
 !!! note "What actually remains unverified about single-pin mode"
     `CFGR1[PINCFG]=10b` makes SOUT carry input and output both. Teensyduino already sets
@@ -263,7 +265,7 @@ and were not, is in [First light](#first-light-what-it-took-2026-09-18) below.
 ### M0 — before the camera is connected
 
 ```bash
-uv run pytest                                     # 68 tests
+uv run pytest                                     # 73 tests
 uv run --group firmware python -m platformio run -d firmware -t upload
 ```
 
@@ -359,22 +361,48 @@ brightness linearly (733 → 350 DN from 102 ms to 1.3 ms), so interface-window 
 
 ### Clock rates
 
-On the bench wiring (jumper wires, Saleae probes on SDAT at both ends):
+On the bench wiring (jumper wires, Saleae probes on SDAT at both ends), all three rates
+work, with the sampling point chosen automatically at every `START`:
 
 | SCLK | Result |
 |---|---|
-| 12.375 MHz | 5/5 starts, 0 failed rows, 8.4 fps |
-| 24.75 MHz | 5/5 starts, 0 failed rows, 0 dropped over 200 frames, **17.9 fps** |
-| 49.5 MHz | Fails. Sampling at the normal edge sees nothing usable; `SAMPLE 1` receives the training pattern cleanly (327/328) but pixel rows arrive garbled, so the row lock fails |
+| 12.375 MHz | 0 failed rows, 8.4 fps |
+| 24.75 MHz | 0 failed rows, 0 dropped over 200 frames, 17.9 fps |
+| **49.5 MHz** | **0 failed rows and 0 concealed pixels over 2100 frames (60 s, 220 million pixel words), 35.3 fps** — the default |
 
-At 49.5 MHz the sensor's SDAT never reaches full-width bits on the analyser, only narrow
-slivers. Its output is current-limited (9.6 mA at `output_curr` = 3). Driving an estimated
-30 pF (jumper wires, two Teensy pads, one or two probe tips) at 0.32 V/ns takes ~10 ns per
-full swing, which is the whole half-period. The alternating training pattern survives it;
-pixel data with runs of equal bits does not. That is a wiring limit, not a firmware one.
-Breadboards have many virtues; bandwidth is not among them.
-Shorter leads, a ground next to SDAT, and taking the probes off SDAT are the first things
-to try.
+**Where the receiver samples each bit is what makes 49.5 MHz work.** The sensor changes
+SDAT ~10 ns after the SCLK edge reaches it, and both the edge and the data cross the wiring
+on the way. At 49.5 MHz a bit lasts 20 ns, so that round trip is half a bit or more, and
+sampling on the rising edge, as the reference host does, lands on the transition. The
+Teensy's SPI can sample at four points per bit: on the rising or the falling edge, each with
+or without one extra 10 ns clock of delay (`CFGR1[SAMPLE]`). Measured with
+`tools/link_quality.py`, share of words with broken framing:
+
+| SCLK | rising | rising + delay | falling | falling + delay |
+|---|---|---|---|---|
+| 12.375 MHz | 0 % | 0 % | 0 % | 0 % |
+| 24.75 MHz | 0 % | 0 % | 0 % | 13 % |
+| 49.5 MHz | 79 % | 2 % | **0 %** | 78 % |
+
+So the right point depends on the clock rate, and would move with different wiring. `START`
+therefore measures it every time, on the training pattern the sensor sends first, and then
+checks 8 rows of real pixel data before streaming. The
+[firmware page](firmware.md#choosing-the-sampling-point) has the details, and `START`
+reports what it found:
+
+```
+START sampling: training breaks per 1023 bits  rise 1016  fall 0  rise+d 2  fall+d 1020  -> fall
+START check: 8 rows of the discarded first frame, 0 bad words
+```
+
+!!! note "A diagnosis that was wrong"
+    Before the sampling point was measured, these pages blamed 49.5 MHz's failure on the
+    wiring: the sensor's current-limited output could not slew the capacitance of jumper
+    wires and probes in half a bit. It looked plausible, and the logic analyser even showed
+    narrow slivers of SDAT at the sensor, but at 250 MS/s (4 ns per sample) it could not
+    resolve a 20 ns bit well enough to judge edges. Measuring the error rate at every
+    sampling point settled it: the edges were fine, the sample was in the wrong place.
+    Breadboards have many limits; this was not one of them.
 
 ### M3 — first frame
 

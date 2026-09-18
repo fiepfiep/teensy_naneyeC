@@ -28,29 +28,67 @@ static inline uint16_t pp_at(const uint32_t* w, uint32_t idx) {
     return (uint16_t)((acc >> (52u - off)) & 0xFFFu);
 }
 
-// Unpack one captured row into 8-bit pixels, skipping the 8 training words.
-// Returns the number of pixel words that failed start/stop validation.
-static inline uint32_t unpack_row_gray8(const uint32_t* w, uint8_t* out) {
+// Beyond this many broken words the row is lost rather than damaged: concealment would
+// only invent data, and the row is reported as failed either way.
+constexpr uint32_t CONCEAL_MAX_PER_ROW = 32;
+
+// Extract one row's 320 pixel values, skipping the 8 training words.
+//
+// Error concealment: a word whose start or stop bit is wrong is known to be corrupt, so
+// its value is replaced by the mean of the nearest intact pixels to the left and right on
+// the same row (or the one that exists, at an edge). This cannot correct errors in the ten
+// data bits of a word whose framing survived -- SEIM carries no other redundancy -- but it
+// keeps a detected error from reaching the image as a full-scale speck.
+//
+// Returns the number of words that failed validation; *concealed (if given) receives how
+// many were replaced. With conceal = false corrupt words are left exactly as received (still
+// counted), for measurements that would rather mask them than have them estimated.
+static inline uint32_t extract_row(const uint32_t* w, uint16_t* px,
+                                   uint32_t* concealed = nullptr, bool conceal = true) {
     uint32_t bad = 0;
+    uint8_t ok[WIDTH];
     for (uint32_t i = 0; i < WIDTH; i++) {
         const uint16_t word = pp_at(w, TRAINING_PP + i);
-        if (!word_is_pixel(word)) bad++;
-        out[i] = (uint8_t)(word_pixel(word) >> 2);
+        ok[i] = word_is_pixel(word) ? 1 : 0;
+        bad += 1u - ok[i];
+        px[i] = word_pixel(word);
     }
+    uint32_t fixed = 0;
+    if (conceal && bad && bad <= CONCEAL_MAX_PER_ROW) {
+        for (uint32_t i = 0; i < WIDTH; i++) {
+            if (ok[i]) continue;
+            int32_t l = (int32_t)i - 1, r = (int32_t)i + 1;
+            while (l >= 0 && !ok[l]) l--;
+            while (r < (int32_t)WIDTH && !ok[r]) r++;
+            if (l >= 0 && r < (int32_t)WIDTH) px[i] = (uint16_t)((px[l] + px[r] + 1u) / 2u);
+            else if (l >= 0) px[i] = px[l];
+            else if (r < (int32_t)WIDTH) px[i] = px[r];
+            else continue;
+            fixed++;
+        }
+    }
+    if (concealed) *concealed = fixed;
+    return bad;
+}
+
+// Unpack one captured row into 8-bit pixels. Returns the number of pixel words that failed
+// start/stop validation; see extract_row() for what happens to them.
+static inline uint32_t unpack_row_gray8(const uint32_t* w, uint8_t* out,
+                                        uint32_t* concealed = nullptr, bool conceal = true) {
+    uint16_t px[WIDTH];
+    const uint32_t bad = extract_row(w, px, concealed, conceal);
+    for (uint32_t i = 0; i < WIDTH; i++) out[i] = (uint8_t)(px[i] >> 2);
     return bad;
 }
 
 // Unpack one captured row into packed 10-bit pixels: 4 pixels per 5 bytes, little-endian
 // within the group (p0 low 8 bits, then the spare 2 bits of each pixel in the 5th byte).
-static inline uint32_t unpack_row_gray10(const uint32_t* w, uint8_t* out) {
-    uint32_t bad = 0;
+static inline uint32_t unpack_row_gray10(const uint32_t* w, uint8_t* out,
+                                         uint32_t* concealed = nullptr, bool conceal = true) {
+    uint16_t all[WIDTH];
+    const uint32_t bad = extract_row(w, all, concealed, conceal);
     for (uint32_t i = 0; i < WIDTH; i += 4) {
-        uint16_t px[4];
-        for (uint32_t k = 0; k < 4; k++) {
-            const uint16_t word = pp_at(w, TRAINING_PP + i + k);
-            if (!word_is_pixel(word)) bad++;
-            px[k] = word_pixel(word);
-        }
+        const uint16_t* px = all + i;
         uint8_t* o = out + (i >> 2) * 5;
         o[0] = (uint8_t)(px[0] & 0xFF);
         o[1] = (uint8_t)(px[1] & 0xFF);
@@ -67,6 +105,17 @@ static inline uint32_t unpack_row_raw12(const uint32_t* w, uint8_t* out) {
     uint16_t* o = (uint16_t*)out;
     for (uint32_t i = 0; i < ROW_PP; i++) o[i] = pp_at(w, i);
     return 0;
+}
+
+// Overwrite the idx-th 12-bit pixel period of a big-endian bit stream. Test support: this is
+// how SELFTEST and INJECT manufacture corrupt words.
+static inline void set_pp(uint32_t* w, uint32_t idx, uint16_t value) {
+    for (uint32_t b = 0; b < PP_BITS; b++) {
+        const uint32_t bit = idx * PP_BITS + b;
+        const uint32_t mask = 1u << (31u - (bit & 31u));
+        if ((value >> (PP_BITS - 1u - b)) & 1u) w[bit >> 5] |= mask;
+        else w[bit >> 5] &= ~mask;
+    }
 }
 
 // Bytes a single row occupies in the outgoing payload, per format.

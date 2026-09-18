@@ -54,7 +54,7 @@ with open_source("replay", fps=19.3) as src:
 ## Viewer
 
 ```bash
-uv run python -m naneye.viewer --source auto --clock 24750000           # live camera
+uv run python -m naneye.viewer --source auto                           # live camera, 49.5 MHz
 uv run python -m naneye.viewer --source replay                         # no camera needed
 uv run python -m naneye.viewer --source auto --snapshot shot.png       # one frame, no window
 ```
@@ -64,9 +64,9 @@ uv run python -m naneye.viewer --source auto --snapshot shot.png       # one fra
 ![The viewer streaming live from the sensor](images/viewer-live.png)
 
 The status bar is the point of it: frame counter and rate, min/max/mean, saturated
-percentage, exposure in ms, SCLK, both config registers, and the three numbers that tell you
-whether to trust the data — `dropped`, `counter gaps` and `rows_failed`. `SYNC LOST` turns
-red.
+percentage, exposure in ms, SCLK, both config registers, and the numbers that tell you
+whether to trust the data: `dropped`, `counter gaps`, `rows_failed` and `concealed`.
+`SYNC LOST` turns red.
 
 ### Register panel
 
@@ -154,8 +154,8 @@ Per run:
 | File | Contents |
 |---|---|
 | `frames.npy` | `(N, 320, 320)`, `uint16` for 10-bit, `uint8` for 8-bit |
-| `meta.csv` | one row per frame: counter, timestamp, exposure, config, drop counters, min/max/mean |
-| `run.json` | settings and a summary, including measured fps and counter gaps |
+| `meta.csv` | one row per frame: counter, timestamp, exposure, config, drop counters, failed rows, concealed pixels, min/max/mean |
+| `run.json` | settings and a summary: measured fps, counter gaps, failed rows, concealed pixels, and packets the host rejected (`host_bad_crc`, `host_resyncs`) |
 | `stream.bin` | with `--raw`, the verbatim packet stream |
 
 A recording is **self-describing**: every frame carried its own exposure, gain, clock rate
@@ -235,8 +235,8 @@ frame period to arrive while streaming.
 | Command | What it does |
 |---|---|
 | `ID` | firmware version, actual SCLK, registers, format, last reset cause |
-| `CLK 12375000` | SCLK rate: `12375000` or `24750000` (`49500000` does not work on jumper wires) |
-| `START` | power-cycle the sensor, start it, lock onto its rows, stream (takes ~1.2 s) |
+| `CLK 49500000` | SCLK rate: `49500000` (~35 fps), `24750000` (~18 fps) or `12375000` (~8 fps). The host tools default to 49.5 MHz |
+| `START` | power-cycle the sensor, start it, choose the sampling point, lock onto its rows, check 8 rows, stream (takes ~1.2 s). The reply reports what the calibration measured |
 | `STOP` | stop streaming (the sensor stays powered, in idle) |
 | `POWER 0` / `POWER 1` | sensor power; switching on waits until it has been off ≥ 1 s |
 | `DEPTH 10` / `8` / `12` | packed 10-bit (default), 8-bit, or raw 12-bit pixel periods |
@@ -244,17 +244,18 @@ frame period to arrive while streaming.
 | `GAIN <ramp_gain> <cds_gain>` | analog gain fields |
 | `REG <reg> <0xHHHH>` (reg 0 or 1) | raw register write, validated |
 | `LED 0` / `LED 1`, `LEDI <mA>`, `LEDMAX <mA>` | illumination: on/off, current (clamped, default ceiling 20 mA), raise the clamp up to 44.6 mA. `LED 1` alone gives almost no light; set `LEDI` first |
-| `SAMPLE 0` / `SAMPLE 1` | sample the data line on the normal or the delayed edge |
+| `CONCEAL 0` / `CONCEAL 1` | leave pixels with broken framing as received, or replace them by their neighbours' mean (default). Either way they are counted |
 | `STATS` | frame counters and link state |
 | `SELFTEST` | check decoding and exposure maths against the embedded reference row |
 
 Diagnostic commands (`LISTEN`, `PROBE`, `START REF`, `START AN`, `ALIGN`, `CLKMEAS`,
-`WDTEST`) are described in [Firmware: diagnostics](firmware.md#diagnostics).
+`CAL`, `SAMPLE`, `PHASE`, `HYS`, `INJECT`, `WDTEST`) are described in
+[Firmware: diagnostics](firmware.md#diagnostics).
 
 ## Tests
 
 ```bash
-uv run pytest          # 68 tests, none needing hardware
+uv run pytest          # 73 tests, none needing hardware
 ```
 
 | File | Covers |
@@ -266,6 +267,7 @@ uv run pytest          # 68 tests, none needing hardware
 | `test_sources.py` | replay path resolution, the synthetic fallback, lossless replay round-trip |
 | `test_device.py` | the `Device` command/reply logic against a simulated serial port |
 | `test_regs.py` | the register model: field layout, round trips, exposure maths against the firmware and the device |
+| `test_link_quality.py` | the link-quality analysis: alignment search, framing-error counting, and the limit that data-bit errors are invisible |
 
 Tests needing the 434 MB capture skip cleanly when it is absent. `test_unpack.py` parses the
 generated `golden_vector.h` so the Python decoder is held to the exact data the device's
@@ -292,6 +294,7 @@ capture the live link and analyse it; `host/naneye/saleae.py` is the client they
 | Tool | What it does |
 |---|---|
 | `tools/device_check.py` | ID, SELFTEST and STATS; no analyser needed |
+| `tools/link_quality.py` | word error rate at every sampling point, at a given clock; no analyser needed |
 | `tools/show_bringup.py` | triggers on sensor power-up, runs a start command and plots what happened |
 | `tools/check_alignment.py` | shows where each row transfer lands relative to the sensor's rows |
 | `tools/capture_link.py`, `tools/analyze_link.py` | general captures: clock rate, phase counts, register writes |

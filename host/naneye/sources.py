@@ -50,7 +50,7 @@ class DeviceSource(Source):
     """A live Teensy on a serial port."""
 
     def __init__(self, port: Optional[str] = None, start: bool = True,
-                 clock_hz: int = 12375000, depth: int = 10):
+                 clock_hz: int = 49500000, depth: int = 10):
         from .transport import Device
 
         self.device = Device(port) if port else Device.open_first()

@@ -48,16 +48,47 @@ counted.
    idle set (bit-banged at ~1 MHz), one frame's worth of clocks with SDAT low, then both
    registers again with idle cleared and the rest of a 648-PP window of zeros. SDAT is then
    released.
-3. **Presence check.** The first received row must be mostly training pattern; if not,
+3. **Choose the sampling point** on the training pattern now arriving
+   ([below](#choosing-the-sampling-point)).
+4. **Presence check.** The next received row must be mostly training pattern; if not,
    `START` reports that no sensor is answering.
-4. **Row lock** (`lock_row_phase()`). How many clocks the first frame's training lasts
+5. **Row lock** (`lock_row_phase()`). How many clocks the first frame's training lasts
    varies slightly from start to start (measured: 12,074–12,084 bits, not a whole number
    of pixel periods), so the row timing is *found*. The firmware scans the received bits
    for row 1's 8 training words followed by pixel 0's start bit, clocks exactly the number
    of bits needed to reach the next row boundary, and checks that row starts with 8
    training words.
-5. **Discard the rest of the first frame**, which is overexposed. Streaming then starts at
-   the next interface window.
+6. **Check 8 rows of real pixels** of the first frame and report their bad words, then
+   **discard the rest of the frame**, which is overexposed. Streaming starts at the next
+   interface window.
+
+## Choosing the sampling point
+
+Where in each bit the receiver samples decides whether the link works at all above
+25 MHz. The sensor changes SDAT about 10 ns after the SCLK edge reaches it, and the edge
+and the data both cross the wiring, so at 49.5 MHz, with 20 ns bits, rising-edge sampling
+lands on the transition. LPSPI offers four sampling points per bit: `TCR[CPHA]` picks the
+rising or falling edge (receive transfers only; register writes stay on CPHA 0, because the
+sensor captures on the rising edge), and `CFGR1[SAMPLE]` adds one 10 ns clock of delay.
+
+`calibrate_sampling()` runs straight after SDAT is released, when the sensor is sending
+~12,000 bits of pure alternating training pattern: a known signal, and the hardest one for
+the link. Each sampling point receives 1024 bits of it, the breaks in the alternation are
+counted, and the point with the fewest wins (ties go to the rising edge, the reference
+host's choice). Then, after the row lock, 8 rows of real pixel data are checked. It costs
+about a third of the training, which is discarded anyway.
+
+| SCLK | rising | falling | rising + delay | falling + delay | chosen |
+|---|---|---|---|---|---|
+| 12.375 MHz | 0 | 0 | 0 | 0 | rising |
+| 24.75 MHz | 0 | 0 | 0 | 1022 | rising |
+| 49.5 MHz | 1016 | 0 | 2 | 1020 | falling |
+
+*Breaks per 1023 bits of training, as `START` reports them on the bench.*
+
+`CAL 0` turns calibration off (setting `SAMPLE` or `PHASE` by hand does too); `CAL 1`
+turns it back on. `tools/link_quality.py` measures the word error rate at every sampling
+point on pixel data, for when the answer needs checking.
 
 The datasheet's shorter sequence (AN000611: a single idle-off write) is still available as
 `START AN` for comparison. On this board it started only sometimes, and its counted phase
@@ -205,12 +236,42 @@ makes that true.
 
 ## Error handling
 
-Every row is validated: the 8 training words must match, and all 320 pixel words must have
-start = 1 and stop = 0. This is cheap, and since it passed 100 % across the reference
-capture, any failure is signal rather than noise. Failures are counted per frame and
-reported in the header. A capture that fails outright (the hardware stops responding)
-triggers a full re-start, which power-cycles the sensor. If the firmware itself hangs, the
-[watchdog](#watchdog) resets the Teensy.
+In layers, because SEIM itself carries almost no redundancy: each 12-bit word has a start
+bit that must be 1 and a stop bit that must be 0, each row starts with 8 known training
+words, and that is all. No checksum, no ECC.
+
+1. **Avoid errors.** The sampling point is measured at every start, above. At the chosen
+   point the link has run 60 s at 49.5 MHz (220 million pixel words) without a single
+   broken word.
+2. **Detect them.** Every row is validated: 8 training words, and start and stop bits on
+   all 320 pixel words. Rows with any error count in the header's `rows_failed`. If the
+   training words fail, the row phase itself is in doubt and the frame is flagged
+   `SYNC_LOST`.
+3. **Conceal what gets through.** A pixel word with broken framing is known to be wrong,
+   so `extract_row()` replaces its value with the mean of the nearest intact pixels on the
+   same row, and counts it in `pixels_concealed` (flag `CONCEALED`). `CONCEAL 0` leaves
+   such pixels exactly as received, for measurements that would rather mask them than
+   have them estimated. A row with more than 32 broken words is lost rather than damaged
+   and is not concealed.
+4. **Recover.** A capture that fails outright (the hardware stops responding) triggers a
+   full re-start, which power-cycles the sensor. If the firmware itself hangs, the
+   [watchdog](#watchdog) resets the Teensy.
+
+What cannot be done: an error in one of a word's ten data bits leaves its framing intact,
+so it cannot be detected, let alone corrected. The defence against those is layer 1.
+
+To exercise layers 2 and 3 on a clean link, `INJECT n` corrupts n random pixel words per
+frame after they are received: start bit knocked out, data scrambled, as a real bit error
+would look. With 500 per frame at 49.5 MHz, every one was detected and concealed:
+
+![Error concealment on one row](images/concealment.png)
+
+| 500 corrupt words per frame | mean \|difference\| from a clean frame | pixels more than 100 DN off |
+|---|---|---|
+| `CONCEAL 0`, as received | 3.64 DN | 416 |
+| `CONCEAL 1` (default) | 2.08 DN, against 1.80 DN of ordinary frame-to-frame noise | 3 |
+
+`SELFTEST` checks concealment too, on the golden row with one word broken on purpose.
 
 ## Register writes land one frame late
 
@@ -245,6 +306,11 @@ them is needed for normal streaming. All except `ID` and `SELFTEST` need streami
 | `START AN` | AN000611's single-write sequence. Known not to work reliably on this board (and 2 clocks off when it does); kept for comparison | Re-testing that finding |
 | `ALIGN n` | Alignment clocks used by `START AN` (datasheet: 10) | Only with `START AN` |
 | `CLKMEAS` | Measures SCLK on the pin, sensor off | After touching the clock tree |
+| `CAL 0` / `CAL 1` | Sampling-point calibration at `START` off or on (default on) | Forcing a sampling point for an experiment |
+| `SAMPLE 0` / `1`, `PHASE 0` / `1` | Sampling point by hand: delayed or not, rising or falling edge. Turns calibration off | With `tools/link_quality.py` |
+| `HYS 0` / `HYS 1` | Schmitt-trigger input on the receive pin | Slow or noisy edges (made no difference on the bench) |
+| `CONCEAL 0` / `CONCEAL 1` | Leave corrupt pixels as received, or replace them (default) | Measurements that mask bad pixels themselves |
+| `INJECT n` | Corrupt n random pixel words per frame (0 = off) | Testing detection and concealment |
 | `WDTEST` | Hangs on purpose; the watchdog must reset the board within 2 s. The only command that succeeds by making the device disappear | Proving the watchdog still works |
 
 Host-side companions, all driving the Saleae through its MCP server:
@@ -275,5 +341,5 @@ up:
 | A bare `TCR` write with `TXMSK=1` might not start a receive-only frame | Works: every row is received this way |
 | SDAT might not be released fast enough at the INTERFACE→SYNC boundary | Works: the sensor owns the last pixel period of the window, so there is a full PP of margin |
 | Clock accounting in `start()` must agree with the sensor to the bit | It could not, because the first frame's length varies. Replaced by the [row lock](#starting-the-sensor) |
-| Signal integrity above 24.75 MHz on flying leads | Confirmed: 49.5 MHz fails on jumper wires ([why](hardware.md#clock-rates)). `SAMPLE 1` helps timing but not the slow edges |
+| Signal integrity above 24.75 MHz on flying leads | 49.5 MHz first failed, and the cause was first misread as slow edges. It was the sampling point, now [measured at every start](#choosing-the-sampling-point); 49.5 MHz runs clean on jumper wires |
 | *Not foreseen:* DMA buffers in cached memory | Found and fixed: the cache is invalidated around every row transfer |

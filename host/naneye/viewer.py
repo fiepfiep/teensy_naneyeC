@@ -54,7 +54,7 @@ def status_lines(header: protocol.Header, img: np.ndarray, fps: float, gaps: int
         f"exp {header.exposure_us() / 1000:6.2f} ms  sclk {header.sclk_hz / 1e6:.3f} MHz"
         f"  cfg 0x{header.cfg0:04X}/0x{header.cfg1:04X}",
         f"dropped {header.frames_dropped}  counter gaps {gaps}"
-        f"  rows_failed {header.rows_failed}"
+        f"  rows_failed {header.rows_failed}  concealed {header.pixels_concealed}"
         + ("  SYNC LOST" if header.sync_lost else ""),
     ]
 
@@ -259,7 +259,8 @@ def main(argv=None):
                     help="'replay', 'auto', a COM port, a .csv capture, or a "
                          "recorded stream file")
     ap.add_argument("--depth", type=int, default=10, choices=(8, 10, 12))
-    ap.add_argument("--clock", type=int, default=12375000)
+    ap.add_argument("--clock", type=int, default=49500000,
+                    help="SCLK: 49500000 (default, ~34 fps), 24750000 or 12375000")
     ap.add_argument("--scale", type=int, default=2)
     ap.add_argument("--fps", type=float, default=19.3, help="replay rate")
     ap.add_argument("--snapshot", metavar="PATH",

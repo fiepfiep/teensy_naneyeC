@@ -7,6 +7,11 @@ Terms used across these pages, in plain words. Datasheet references are to DS000
 : The single clock pulse the host sends after power-up, before the first register write,
   to wake the sensor's configuration interface.
 
+**Concealment**
+: Replacing a pixel whose word arrived with broken framing (so is known to be wrong) by the
+  mean of its intact neighbours. Counted per frame as `pixels_concealed`. It hides an
+  error; it does not recover the true value, which SEIM gives no way to do.
+
 **CONFIG_0, CONFIG_1**
 : The sensor's only two registers, 16 bits each. CONFIG_0 holds exposure (`rows_in_reset`)
   and analog settings. CONFIG_1 holds the output mode, clock mode, frame delay and the
@@ -98,9 +103,14 @@ Terms used across these pages, in plain words. Datasheet references are to DS000
 : The exposure field (CONFIG_0) and the frame-delay field (CONFIG_1). See
   [Exposure](seim.md#exposure).
 
+**Sampling point**
+: Where within each bit the Teensy reads SDAT: on the rising or falling SCLK edge, with or
+  without one extra clock of delay. At 49.5 MHz only one of the four works on the bench
+  wiring, so `START` measures all four on the training pattern and picks the best.
+
 **SCLK**
 : The clock the Teensy sends to the sensor. One data bit moves per rising edge. Supported
-  rates: 12.375 and 24.75 MHz (49.5 MHz does not work on jumper wires).
+  rates: 49.5 MHz (default, ~35 fps), 24.75 and 12.375 MHz.
 
 **SDAT**
 : The single data line, used in both directions at different times: sensor → Teensy during

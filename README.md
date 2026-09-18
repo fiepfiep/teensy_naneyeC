@@ -37,11 +37,11 @@ It is published to <https://fiepfiep.github.io/teensy_naneyeC/> by
 | | |
 |---|---|
 | Reference capture decoded | done: 7 frames, every start/stop bit valid |
-| Host decode, transport, recorder, viewer | done; 68 tests passing, no hardware required |
+| Host decode, transport, recorder, viewer | done; 73 tests passing, no hardware required |
 | Start-up and row lock | reliable: reference start sequence plus a bit-level row lock |
-| 12.375 MHz | 0 failed rows, 8.4 fps |
-| 24.75 MHz | 0 failed rows, 0 dropped over 200 frames, **17.9 fps** |
-| 49.5 MHz | fails on the jumper-wire bench wiring: pixel data does not survive the SDAT capacitance ([why](docs/hardware.md#first-light-what-it-took-2026-09-18)) |
+| 49.5 MHz (default) | **35.3 fps**, 60 s with 0 failed rows and 0 concealed pixels ([how](docs/hardware.md#clock-rates)) |
+| 24.75 / 12.375 MHz | 17.9 / 8.4 fps, 0 failed rows |
+| Error handling | sampling point calibrated at every start; broken pixel words detected and concealed |
 | Exposure control | verified: brightness linear in exposure, 1.3 to 102 ms |
 | Watchdog | 2 s hardware watchdog, reset cause reported by `ID` |
 | Illumination (LED DAC) | implemented, not yet exercised on hardware |
@@ -68,7 +68,7 @@ firmware/               PlatformIO project for the Teensy 4.1
 host/naneye/            decoder, transport, sources, viewer, recorder, Saleae client
 tools/                  golden-capture decoder, test-vector generator, Saleae
                         bring-up tools (show_bringup, check_alignment, capture/analyze_link)
-tests/                  68 tests, no hardware required
+tests/                  73 tests, no hardware required
 ```
 
 ## The reference capture
@@ -93,7 +93,7 @@ The host side is managed with [uv](https://docs.astral.sh/uv/):
 ```bash
 uv sync                                    # create the environment from uv.lock
 uv run python tools/decode_golden.py       # decode the reference capture (~50 s first run)
-uv run pytest                              # 68 tests
+uv run pytest                              # 73 tests
 uv run --group firmware python -m platformio run -d firmware  # build the firmware
 ```
 
@@ -106,11 +106,11 @@ uv run python -m naneye.record --source replay --frames 20 --depth 10 --out buil
 ```
 
 With hardware connected, swap `--source replay` for `--source auto`. Depth defaults to
-10-bit; add `--clock 24750000` for ~18 fps:
+10-bit and the clock to 49.5 MHz (~35 fps):
 
 ```bash
-uv run python -m naneye.viewer --source auto --clock 24750000
-uv run python -m naneye.record --source auto --frames 200 --clock 24750000 --out build/run1
+uv run python -m naneye.viewer --source auto
+uv run python -m naneye.record --source auto --frames 200 --out build/run1
 ```
 
 Viewer keys: `+`/`-` exposure, `h` histogram, `r` raw, `s` save, space pause, `q` quit.
@@ -141,7 +141,7 @@ images come back framed (spec.md section 7).
 ```
 ID                      firmware version, settings, last reset cause (normal / WATCHDOG)
 POWER 0|1               sensor LDO enable (on waits for >= 1 s off: the rail is slow)
-CLK 12375000            SCLK: 12375000, 24750000 or 49500000
+CLK 49500000            SCLK: 49500000, 24750000 or 12375000
 START / STOP            begin or end streaming (START power-cycles the sensor first)
 DEPTH 8|10|12           8-bit, packed 10-bit (default), or raw 12-bit pixel periods
 EXP <rows_in_reset> [rows_delay]

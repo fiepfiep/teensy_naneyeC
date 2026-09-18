@@ -3,7 +3,7 @@
 This project turns an **ams-OSRAM NanEyeC**, a 1 mm² camera sensor, into a USB camera for a
 Windows PC. The sensor sits on an ams **NanoBerry** evaluation board, a **Teensy 4.1**
 microcontroller talks to it, and the PC receives 320 × 320 monochrome images at up to
-18 frames per second, with Python tools to view and record them.
+35 frames per second, with Python tools to view and record them.
 
 Frames keep the sensor's full 10-bit resolution. Every frame carries its own exposure,
 clock and error counters, and a lost or damaged frame is always reported, never hidden.
@@ -26,13 +26,13 @@ histogram.*
 | | |
 |---|---|
 | Streaming images | **working** since 2026-09-18 |
-| 12.375 MHz link | 0 failed rows, 8.4 fps |
-| 24.75 MHz link | 0 failed rows, 0 dropped frames over 200, **17.9 fps** |
-| 49.5 MHz link | does not work on jumper wires; set aside ([why](hardware.md#clock-rates)) |
+| 49.5 MHz link (default) | **35.3 fps**; 60 s without a failed row or a concealed pixel ([how](hardware.md#clock-rates)) |
+| 24.75 / 12.375 MHz | 17.9 / 8.4 fps, 0 failed rows |
+| Error handling | sampling point measured at every start; broken pixel words detected and concealed |
 | Exposure control | verified: brightness follows exposure linearly from 1.3 to 102 ms |
 | Watchdog | hardware watchdog resets a hung Teensy within 2 s |
 | Illumination (the board's LEDs) | implemented, not yet tested on hardware |
-| Host software | viewer, recorder, Python API; 68 automated tests, no hardware needed |
+| Host software | viewer, recorder, Python API; 73 automated tests, no hardware needed |
 
 ## Where to go
 
@@ -90,7 +90,7 @@ doc/                    NOT tracked: datasheets, schematic, reference capture
 firmware/               PlatformIO project for the Teensy 4.1
 host/naneye/            Python package: decoder, transport, viewer, recorder, Saleae client
 tools/                  reference-capture decoder, logic-analyser bring-up tools
-tests/                  68 tests, none needing hardware
+tests/                  73 tests, none needing hardware
 ```
 
 ## Building these docs

@@ -31,6 +31,8 @@ typedef void (*IdleFn)();
 struct FrameInfo {
     uint32_t rows_failed;     // rows with a bad training pattern or bad start/stop bits
     uint32_t pixels_failed;   // individual pixel words that failed validation
+    uint32_t pixels_concealed;  // of those, replaced by their neighbours' mean
+    uint32_t rows_sync_lost;    // rows whose 8 training words did not match: phase lost
     uint32_t timestamp_us;    // start of readout
     uint32_t duration_us;     // readout duration
 };
@@ -64,6 +66,33 @@ void set_delayed_sample(bool on);
 void set_align_clocks(uint32_t n);
 uint32_t align_clocks();
 bool delayed_sample();
+// Sample received data on the falling SCLK edge instead of the rising one (TCR[CPHA], receive
+// transfers only). With set_delayed_sample() this gives four sampling points per bit.
+void set_rx_phase(bool falling);
+bool rx_phase();
+// Automatic choice of the sampling point at every START (on by default). Setting SAMPLE or
+// PHASE by hand turns it off; CAL 1 turns it back on.
+struct SampleCal {
+    bool automatic;
+    uint32_t errors[4];     // alternation breaks in 1024 training bits, per sampling point:
+                            // rising, falling, rising+delay, falling+delay
+    uint8_t choice;         // index of the point chosen
+    uint32_t verify_rows;   // rows of the (discarded) first frame checked after the lock
+    uint32_t verify_bad_words;
+};
+const SampleCal& sample_calibration();
+// Replace pixel words with broken framing by their neighbours' mean (default), or leave
+// them as received. Either way they are counted in the frame header.
+void set_conceal(bool on);
+bool conceal();
+// Test hook: corrupt this many random pixel words per captured frame (0 = off).
+void set_inject(uint32_t per_frame);
+uint32_t inject();
+void set_auto_sample(bool on);
+bool auto_sample();
+// Schmitt-trigger input on the receive pin.
+void set_input_hysteresis(bool on);
+bool input_hysteresis();
 
 void set_config(uint16_t cfg0, uint16_t cfg1);
 uint16_t config0();

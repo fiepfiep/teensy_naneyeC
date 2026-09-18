@@ -28,7 +28,7 @@ from .sources import open_source
 
 META_FIELDS = ["index", "frame_counter", "timestamp_us", "exposure_pp", "exposure_us",
                "sclk_hz", "cfg0", "cfg1", "format", "flags", "rows_failed",
-               "frames_dropped", "min", "max", "mean"]
+               "pixels_concealed", "frames_dropped", "min", "max", "mean"]
 
 
 def main(argv=None):
@@ -38,7 +38,8 @@ def main(argv=None):
     ap.add_argument("--out", required=True, help="output directory")
     ap.add_argument("--frames", type=int, default=100)
     ap.add_argument("--depth", type=int, default=10, choices=(8, 10, 12))
-    ap.add_argument("--clock", type=int, default=12375000)
+    ap.add_argument("--clock", type=int, default=49500000,
+                    help="SCLK: 49500000 (default, ~34 fps), 24750000 or 12375000")
     ap.add_argument("--exposure", type=int, default=None,
                     help="rows_in_reset (0 = longest exposure)")
     ap.add_argument("--led", type=float, default=None, help="LED current in mA")
@@ -87,6 +88,7 @@ def main(argv=None):
                     "format": header.format_name,
                     "flags": header.flags,
                     "rows_failed": header.rows_failed,
+                    "pixels_concealed": header.pixels_concealed,
                     "frames_dropped": header.frames_dropped,
                     "min": int(img.min()),
                     "max": int(img.max()),
@@ -128,11 +130,18 @@ def main(argv=None):
         "counter_gaps": counter_gaps,
         "frames_dropped_reported": meta[-1]["frames_dropped"],
         "rows_failed_total": sum(m["rows_failed"] for m in meta),
+        "pixels_concealed_total": sum(m["pixels_concealed"] for m in meta),
         "sclk_hz": meta[-1]["sclk_hz"],
         "exposure_us": meta[-1]["exposure_us"],
         "cfg0": meta[-1]["cfg0"],
         "cfg1": meta[-1]["cfg1"],
     }
+    # Packets the host itself rejected: a counter gap the device did not count as dropped
+    # means the frame left the Teensy but did not arrive intact.
+    reader = getattr(getattr(source, "device", None), "reader", None)
+    if reader is not None:
+        summary["host_bad_crc"] = reader.bad_crc
+        summary["host_resyncs"] = reader.resyncs
     with open(os.path.join(args.out, "run.json"), "w") as f:
         json.dump(summary, f, indent=2)
 
@@ -141,7 +150,11 @@ def main(argv=None):
           f"{summary['measured_fps']} fps measured")
     print(f"  counter gaps {counter_gaps}, device reported "
           f"{summary['frames_dropped_reported']} dropped, "
-          f"{summary['rows_failed_total']} failed rows")
+          f"{summary['rows_failed_total']} failed rows, "
+          f"{summary['pixels_concealed_total']} pixels concealed")
+    if "host_bad_crc" in summary:
+        print(f"  host: {summary['host_bad_crc']} packets failed CRC, "
+              f"{summary['host_resyncs']} resyncs")
     if counter_gaps or summary["rows_failed_total"]:
         print("  NOTE: frames were lost or rows failed validation; see meta.csv")
     return 0

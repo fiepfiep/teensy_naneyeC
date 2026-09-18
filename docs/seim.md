@@ -172,6 +172,12 @@ limit on clock rate, because it does not shrink as the period does:
 | 49.5 MHz | 20.2 ns | ~12 ns — workable |
 | 62.6 MHz | 16.0 ns | ~8 ns — don't |
 
+Those figures come from the reference board, a Raspberry Pi plugged straight onto the
+NanoBerry. On the Teensy bench the round trip is longer (pad delays, jumper wires), and at
+49.5 MHz rising-edge sampling lands on the transition while falling-edge sampling is clean.
+The firmware measures the best sampling point at every start instead of assuming one: see
+[Firmware: choosing the sampling point](firmware.md#choosing-the-sampling-point).
+
 !!! warning "AN000611 disagrees, and it is wrong for this board"
     The app note advises sampling on the **falling** edge above 40 MHz. Measured here,
     falling-edge sampling would give ~8 ns of setup where the rising edge gives 24 ns. Trust

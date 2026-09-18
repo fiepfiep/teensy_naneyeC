@@ -70,9 +70,15 @@ Bring-up went in stages ([Hardware: bring-up](hardware.md#bring-up)):
    an uninvalidated data cache over the DMA buffers, a datasheet start sequence that was
    unreliable on this board (replaced by a bit-level row lock), and a power-off time too
    short for a clean reset.
-4. **After first light**: 24.75 MHz verified, 49.5 MHz diagnosed as a wiring limit, a
-   hardware watchdog added and tested by deliberately hanging the firmware, and live
-   register control added to the viewer, checked field by field on the sensor.
+4. **After first light**: 24.75 MHz verified, a hardware watchdog added and tested by
+   deliberately hanging the firmware, and live register control added to the viewer,
+   checked field by field on the sensor.
+5. **49.5 MHz and error handling.** Asked to make the higher clock work and to find a way
+   to do error correction, Claude first measured instead of theorising: a tool that counts
+   broken words at each of the four sampling points the Teensy can use. One point was
+   perfect. That became automatic calibration at every start, followed by detection and
+   concealment of whatever errors still get through, tested by injecting 500 errors per
+   frame. Result: 35 fps, 60 s without a single bad word.
 
 ## What went wrong along the way
 
@@ -87,6 +93,11 @@ Recorded because it is part of how the result was reached:
   measured and ruled out. The deciding step was comparing the firmware's received bits
   with the analyser's view of the same wire, which showed the sensor had been streaming
   correctly all along.
+- **A plausible physical explanation that was wrong.** 49.5 MHz first failed, and Claude
+  attributed it to slow edges: the sensor's weak output driver against the capacitance of
+  jumper wires and probes. The numbers seemed to fit, and the docs said so for a while. It
+  was the sampling point. The logic analyser, at 4 ns per sample, could not resolve 20 ns
+  bits well enough to tell the difference; measuring the error rate directly could.
 - **Documentation drift.** Claims written before the hardware existed ("never run on
   hardware", a register sequence, a datasheet section number) went stale or were wrong,
   and were corrected when checked against measurements.

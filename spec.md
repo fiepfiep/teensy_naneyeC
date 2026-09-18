@@ -61,6 +61,11 @@ The ~8 ns launch delay is a **round trip**: Teensy clock edge out → sensor →
 It is the hard limit on SCLK. At 49.5 MHz (20.2 ns period) the setup window is ~12 ns; at
 62.6 MHz (16.0 ns) only ~8 ns. This independently justifies D6.
 
+**On this bench the round trip is longer.** Teensy pad delays and jumper wires add to it,
+and at 49.5 MHz rising-edge sampling landed on the transition (79 % of words corrupt), while
+falling-edge sampling was clean (2026-09-18, `tools/link_quality.py`). The firmware
+therefore measures the sampling point at every start (§6.4) rather than fixing the edge.
+
 ### 3.2 Register sequence used by the working host
 
 All writes are 24 bits: `1001` + 3-bit address + 16-bit data (MSB first) + `0`, sent at full
@@ -406,9 +411,12 @@ RUN_IN        → one frame's worth of clocks (1,279,366) with SDAT driven low �
                 reference host does
 START         → CONFIG_0; CONFIG_1 with idle=0 and rows_delay=0 at SCLK rate, zeros to the
                 end of a 648 PP window, release SDAT (§3.2 step 2)
+CALIBRATE     → 1024 bits of the alternating training at each of 4 sampling points (rising or
+                falling edge, with or without CFGR1[SAMPLE]); keep the one with fewest breaks
 PRESYNC       → first row received: must be mostly training ("is there a sensor?")
 ROW_LOCK      → scan the bits for row 1's 8×0x555 → "11" break; clock the exact number of
-                bits to the next row boundary; that row must show 8 training words
+                bits to the next row boundary; that row must show 8 training words, and
+                the next 8 rows of real pixels are checked and their bad words reported
 FRAME_0       → rest of the first frame + EOF clocked and DISCARDED (saturated — §3.5)
 STREAM        → per frame: 648 PP interface window (drive SDAT: 2 register writes, then
                 zeros, sensor owns the last PP), tristate, sync + delay, 320 rows, 8 PP EOF
@@ -441,6 +449,18 @@ Every row is validated: 8 training words must read `0x555`, all 320 pixel words 
 start = 1 and stop = 0. Rows failing validation increment a counter in the frame header; a
 threshold triggers re-sync. Full validation is cheap and, per §3.1, is expected to pass
 100 % of the time — so any failure is real information.
+
+**Concealment.** SEIM carries no redundancy beyond each word's start and stop bits, so
+errors in the ten data bits cannot be corrected or even detected; errors that break the
+framing can be detected, and then the value is known to be wrong. Such a pixel is replaced
+by the mean of its nearest intact neighbours on the row and counted in the header
+(`pixels_concealed`, flag `CONCEALED`); `CONCEAL 0` leaves it as received instead. Rows
+with more than 32 broken words are not concealed: that is a lost row, not a damaged one.
+`SYNC_LOST` now means a row's training words failed (the phase is in doubt), not that a
+pixel was damaged. `INJECT n` corrupts n words per frame to test all of this on a clean
+link: with 500 per frame, the concealed image differs from a clean one by 2.1 DN on
+average against 1.8 DN of frame-to-frame noise, and 3 pixels stay more than 100 DN off,
+against 416 without concealment.
 
 ### 6.6b Watchdog
 
@@ -558,7 +578,7 @@ were used to produce the §3 results.
 | **M5** | Control | Exposure, gain, bit depth and SCLK settable at runtime. Measured `t_exp` matches the §5.4 formula within 1 % (verified by a light-level sweep); black level responds as predicted |
 | **M5b** | Illumination | `LED`/`LEDI` work; measured LED current matches `V_DAC / 56 Ω`; image brightness scales with commanded current |
 | **M6** | Measurement readiness | Lossless recording with metadata; dark-frame/temporal-noise/FPN report; black level and full-scale characterised vs SCLK-to-MCLK mismatch. Temporal noise should land near the reference's 2.74 DN |
-| **M7** | Stretch | 49.5 MHz / 38.6 fps sustained; single-pin half-duplex (§4.3) |
+| **M7** | Stretch | 49.5 MHz / 38.6 fps sustained; single-pin half-duplex (§4.3). **49.5 MHz reached 2026-09-18**: 35.3 fps sustained for 60 s, 0 failed rows (the 38.6 fps ceiling assumes no gaps between row transfers). Single-pin not attempted |
 
 ---
 
@@ -579,8 +599,8 @@ tests/          golden decode regression, protocol round-trip
 
 | # | Risk | Mitigation |
 |---|------|-----------|
-| R1 | Jumper-wire signal integrity ≥ 25 MHz (24 R series + ~30 pF of pads, caps and connector stubs) | **Measured 2026-09-18:** 24.75 MHz clean (17.9 fps, 0 failed rows over 200 frames). 49.5 MHz fails on the bench wiring: training words survive (with `SAMPLE 1`) but pixel data does not — the sensor's current-limited SDAT drive (9.6 mA) cannot slew the net's capacitance in a 10 ns half-period. Needs shorter wires / fewer loads on SDAT |
-| R2 | ~8 ns measured round-trip delay caps SCLK | Stay ≤ 49.5 MHz; treat 62.6 MHz as out of scope |
+| R1 | Jumper-wire signal integrity ≥ 25 MHz (24 R series + ~30 pF of pads, caps and connector stubs) | **Resolved 2026-09-18:** all three rates run clean on jumper wires. 49.5 MHz first looked like a slew-rate limit; it was the sampling point (§3.1), now calibrated at every start. 60 s at 49.5 MHz: 0 failed rows, 0 concealed pixels |
+| R2 | ~8 ns measured round-trip delay caps SCLK (longer on this bench) | Stay ≤ 49.5 MHz; treat 62.6 MHz as out of scope. The sampling-point calibration absorbs the delay up to 49.5 MHz |
 | R3 | LPSPI may insert idle SCK cycles between 12-bit frames → §3.3 pixel corruption | `TCR[CONT]`; fallback to one-row `FRAMESZ` (option B, §6.2); verified by Saleae in M4 |
 | R4 | Sensor has no chip select and cannot share the bus | LPSPI3 dedicated to the camera; LED DAC bit-banged on GPIO |
 | R5 | Changing the LPSPI root clock affects all LPSPI instances | Only LPSPI3 is used; no other SPI peripheral in the design |

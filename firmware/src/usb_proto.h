@@ -30,6 +30,7 @@ enum Flags : uint8_t {
     FLAG_SYNC_LOST = 1u << 0,
     FLAG_CLOCK_GAP = 1u << 1,
     FLAG_FIRST_DISCARDED = 1u << 2,
+    FLAG_CONCEALED = 1u << 3,  // some pixels were corrupt and replaced by their neighbours
 };
 
 // 52-byte header. All fields little-endian; crc32 covers header[0..47] plus the payload.
@@ -51,7 +52,7 @@ struct __attribute__((packed)) Header {
     uint16_t cfg0;
     uint16_t cfg1;
     uint32_t frames_dropped;
-    uint32_t reserved;
+    uint32_t pixels_concealed;  // was reserved (always 0); see seim_unpack.h extract_row()
     uint32_t crc32;
 };
 
