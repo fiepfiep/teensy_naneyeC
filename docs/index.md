@@ -5,9 +5,8 @@ Windows PC. The sensor sits on an ams **NanoBerry** evaluation board, a **Teensy
 microcontroller talks to it, and the PC receives 320 × 320 monochrome images at up to
 18 frames per second, with Python tools to view and record them.
 
-It is built for **measurement and image capture**, not for video calls. Frames keep the
-sensor's full 10-bit resolution. Every frame carries its own exposure, clock and error
-counters, and a lost or damaged frame is always reported, never hidden.
+Frames keep the sensor's full 10-bit resolution. Every frame carries its own exposure,
+clock and error counters, and a lost or damaged frame is always reported, never hidden.
 
 ![The bench setup: Teensy 4.1 on a breadboard wired to the NanoBerry board, with a Saleae logic analyser](images/bench-setup.jpg)
 
@@ -33,7 +32,7 @@ histogram.*
 | Exposure control | verified: brightness follows exposure linearly from 1.3 to 102 ms |
 | Watchdog | hardware watchdog resets a hung Teensy within 2 s |
 | Illumination (the board's LEDs) | implemented, not yet tested on hardware |
-| Host software | viewer, recorder, Python API; 53 automated tests, no hardware needed |
+| Host software | viewer, recorder, Python API; 68 automated tests, no hardware needed |
 
 ## Where to go
 
@@ -47,6 +46,7 @@ histogram.*
 | know why a decision was made | [Design record](design.md) |
 | know where the code departs from the datasheet, and why | [Datasheet cross-check](datasheet-crosscheck.md) |
 | look up a term (PP, SEIM, training pattern…) | [Glossary](glossary.md) |
+| know how the project was developed and brought up with Claude | [How this was built with Claude](built-with-claude.md) |
 
 ## How it works, in one paragraph
 
@@ -60,6 +60,12 @@ the PC over USB with a header and a checksum. On the PC, Python code decodes and
 the frames. The [SEIM protocol reference](seim.md) has the details.
 
 ## A note on how this was built
+
+The specification, firmware, host software, tests and these pages were written by Claude
+(Anthropic's AI model) in Claude Code, which also did the bring-up on the bench, driving the
+Teensy over USB and a logic analyser through its MCP server. A person did the wiring, made
+the decisions and caught the mistakes. [How this was built with Claude](built-with-claude.md)
+tells that story, including the mistakes.
 
 Almost nothing here was taken on trust from the datasheet. Before any code was written, a
 logic-analyser capture of a **working** NanoBerry ↔ Raspberry Pi link was decoded
@@ -84,7 +90,7 @@ doc/                    NOT tracked: datasheets, schematic, reference capture
 firmware/               PlatformIO project for the Teensy 4.1
 host/naneye/            Python package: decoder, transport, viewer, recorder, Saleae client
 tools/                  reference-capture decoder, logic-analyser bring-up tools
-tests/                  53 tests, none needing hardware
+tests/                  68 tests, none needing hardware
 ```
 
 ## Building these docs

@@ -1,6 +1,7 @@
 # Getting started
 
-From an empty desk to images on screen. Allow about an hour, most of it wiring. Everything
+From an empty desk to images on screen. Allow about an hour, most of it wiring and some
+of it looking for the jumper wire that rolled under the desk. Everything
 here has been done on Windows 11. The Python side should work anywhere, but that is untested.
 
 ## 1. What you need
@@ -33,8 +34,9 @@ J2.36 / 38 / 40, and J2.9 to ground.
 
 !!! warning "Three things that matter"
     - **Pins 26 and 1 both go to J2.19.** The Teensy transmits on 26 and receives on 1.
-    - **Leave the NanoBerry's other connectors (`J1`, `P1`) empty.** They share the sensor's
-      data lines; anything plugged in there interferes.
+    - **Nothing that drives a signal on the NanoBerry's other connectors (`J1`, `P1`).**
+      They share the sensor's data lines, so anything driving them interferes. A
+      logic-analyser probe is fine.
     - **Short wires, with a ground wire close to SCLK and SDAT.** The link runs at 12–25 MHz,
       where long loose wires start to corrupt data.
 
@@ -50,7 +52,8 @@ uv run --group firmware python -m platformio run -d firmware -t upload
 ```
 
 The first `upload` downloads the Teensy toolchain, which takes a few minutes. If it reports
-`error writing to Teensy`, run it again; the first attempt after a reboot often fails. If
+`error writing to Teensy`, run it again; the first attempt after a reboot often fails. By
+now it is practically a tradition. If
 it keeps failing, press the white button on the Teensy once and retry.
 
 ## 4. Check the Teensy
@@ -80,17 +83,23 @@ WATCHDOG` straight after flashing is normal.
 uv run python -m naneye.viewer --source auto --clock 24750000
 ```
 
-This finds the Teensy, powers the sensor, starts it and opens a window. Starting takes
-about a second, because the sensor is powered off for 1 s first to guarantee a clean reset.
+This finds the Teensy, powers the sensor, starts it and opens two windows: the image, with
+the sensor's registers decoded beside it, and **NanEyeC controls**, with sliders for
+exposure, frame delay, gain and the analog settings. Starting takes about a second, because
+the sensor is powered off for 1 s first to guarantee a clean reset.
 
 | Key | Action |
 |---|---|
 | ++plus++ / ++minus++ | longer / shorter exposure |
 | ++h++ | histogram on/off |
+| ++g++ | register panel on/off |
+| ++d++ | datasheet-recommended analog settings |
 | ++r++ | raw vs auto-scaled contrast |
 | ++s++ | save the frame as PNG |
 | ++space++ | pause |
 | ++q++ | quit |
+
+[Host software](host.md#controls) explains every slider.
 
 The line under the image to watch is `dropped … counter gaps … rows_failed`. `rows_failed`
 should stay at 0. A few dropped frames mean the PC did not keep up; they are counted, never
@@ -140,7 +149,7 @@ script, and the other way round.
 | `START failed: pre-sync training pattern 0/328 … No sensor answering` | The sensor is not powered or not connected: check pin 2 → J2.33, 5 V and ground, and that SDAT goes to J2.19 |
 | `START failed: sensor answers … but could not lock onto its rows` | The sensor answers but its data arrives damaged: wiring too long or too loose for this clock. Use `--clock 12375000`, shorten the SDAT wire, add a ground next to it |
 | `rows_failed` above 0 while streaming | Intermittent signal-integrity problem, same remedies. Frames with failed rows are flagged, not hidden |
-| Image very dark or all white | Exposure. Press ++minus++ / ++plus++, or send `EXP 0` (longest) … `EXP 159` (shortest) |
+| Image very dark or all white | Exposure. Press ++minus++ / ++plus++, or send `EXP 0` (longest) … `EXP 159` (shortest). Or something is in front of a 1 mm² lens, which takes remarkably little; it happened while these docs were being written |
 | Lots of `dropped` frames | The PC is not reading fast enough: close other programs, or record rather than view |
 
 Beyond that, [Hardware and bring-up](hardware.md#bring-up) has the full staged procedure and

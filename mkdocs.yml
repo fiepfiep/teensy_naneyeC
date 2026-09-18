@@ -38,6 +38,7 @@ nav:
       - Design record (spec.md): design.md
       - Datasheet cross-check: datasheet-crosscheck.md
       - Glossary: glossary.md
+      - How this was built with Claude: built-with-claude.md
 
 plugins:
   - search

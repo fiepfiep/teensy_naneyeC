@@ -263,7 +263,7 @@ and were not, is in [First light](#first-light-what-it-took-2026-09-18) below.
 ### M0 — before the camera is connected
 
 ```bash
-uv run pytest                                     # 53 tests
+uv run pytest                                     # 68 tests
 uv run --group firmware python -m platformio run -d firmware -t upload
 ```
 
@@ -338,7 +338,8 @@ The sensor itself was fine from the first power-up. Three faults on our side hid
 they are worth knowing because each one looked like a sensor problem:
 
 1. **Stale cache, not a silent sensor.** `LISTEN` read all zeros, or endless `0xAAA`. The
-   logic analyser showed the sensor streaming perfect frames on pin 1 the whole time: the
+   logic analyser showed the sensor streaming perfect frames on pin 1 the whole time, too
+   polite to point out that nobody was reading them: the
    row buffers are `DMAMEM`, which is cached, and nothing invalidated them after the DMA.
    Fixed in `start_row()` / `wait_row()`. Lesson: when the firmware and the wire disagree,
    believe the wire.
@@ -371,6 +372,7 @@ slivers. Its output is current-limited (9.6 mA at `output_curr` = 3). Driving an
 30 pF (jumper wires, two Teensy pads, one or two probe tips) at 0.32 V/ns takes ~10 ns per
 full swing, which is the whole half-period. The alternating training pattern survives it;
 pixel data with runs of equal bits does not. That is a wiring limit, not a firmware one.
+Breadboards have many virtues; bandwidth is not among them.
 Shorter leads, a ground next to SDAT, and taking the probes off SDAT are the first things
 to try.
 

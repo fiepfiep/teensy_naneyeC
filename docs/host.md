@@ -68,16 +68,75 @@ percentage, exposure in ms, SCLK, both config registers, and the three numbers t
 whether to trust the data — `dropped`, `counter gaps` and `rows_failed`. `SYNC LOST` turns
 red.
 
+### Register panel
+
+Beside the image, both sensor registers are decoded field by field, with each value's
+meaning in real units: exposure in ms, the frame-rate ceiling, gains, voltages, drive
+current. Fields marked `*` are not at the datasheet's recommended value. Grey fields marked
+`(fw)` belong to the firmware (output mode, idle, and the clock bits that must match SCLK)
+and cannot be changed from the viewer. ++g++ hides the panel.
+
+![The viewer with the register panel](images/viewer-registers.png)
+
+*Here the camera was looking at something dark, so auto-contrast stretches a ~40 DN range
+into noise.*
+
+### Controls
+
+With a live camera, a second window, **NanEyeC controls**, has a slider for every field
+that is safe to change while streaming. Below the sliders is what each one means, and
+whether it is already *in force on the sensor* or still *sending*.
+
+![The controls window](images/viewer-controls.png)
+
+| Slider | Field | What it does |
+|---|---|---|
+| exposure | `rows_in_reset` | right = longer. 1.3–102 ms at 12.375 MHz, half that at 24.75 MHz |
+| delay | `rows_delay` | adds 16n + 2 rows per frame: slower frame rate, longer maximum exposure |
+| ramp gain | `ramp_gain` | ADC gain 0.79× / 0.99× / 1.32× / 1.97× |
+| CDS gain | `cds_gain` | column amplifier 1.3× / 2.0× |
+| vrst | `vrst_pix` | pixel reset voltage |
+| offset | `offset_ramp` | ADC ramp offset voltage |
+| vref | `vref` | ADC reference; sets the black level |
+| cvc | `cvc_curr` | column converter current; affects column noise |
+| drive | `output_curr` | SDAT output drive, 3.9–9.6 mA; lower is quieter but gives slower edges |
+| bias+ | `bias_curr_increase` | pixel bias current |
+
+A change is sent once the slider has been still for 0.15 s, as a write of the whole
+register, and takes effect on the next frame. The device stays the source of truth: the
+sliders start from the registers in the first frame, and the firmware-owned bits are always
+taken from the latest frame. All of this was checked on hardware, including frame delays up
+to 31, with no failed rows.
+
+!!! note "Recommended is not automatically better"
+    ++d++ sets the datasheet's recommended analog values. On the same dark scene at
+    24.75 MHz, `vref` 1 → 2 lowered the black level by 76–130 DN (more usable range), but
+    `cvc_curr` 3 → 1 doubled the column fixed-pattern noise (4.3 → 8.4 DN). `vref = 2` with
+    `cvc_curr = 3` measured best. That is one scene and one clock rate, not a
+    characterisation.
+
 | Key | Action |
 |---|---|
 | ++q++ / ++esc++ | quit |
 | ++s++ | save the current frame as PNG |
 | ++r++ | raw vs autoscaled contrast |
 | ++h++ | histogram on/off |
+| ++g++ | register panel on/off |
+| ++d++ | datasheet-recommended analog settings (moves the sliders) |
 | ++space++ | pause |
-| ++plus++ / ++minus++ | exposure (`rows_in_reset`, ±8) |
+| ++plus++ / ++minus++ | longer / shorter exposure (moves the exposure slider) |
 | ++l++ | LED on/off |
 | ++bracket-left++ / ++bracket-right++ | LED current ∓1 mA |
+
+The register model behind all this is `naneye.regs`: every field with its position, units,
+recommended value and whether it is safe to edit, plus the exposure and frame-period maths.
+
+```python
+from naneye import regs
+print("
+".join(regs.describe(0x009F, 0x005C, sclk_hz=24.75e6)))
+c0, c1 = regs.pack({"ramp_gain": 2, "rows_delay": 4}, 0x009F, 0x005C)
+```
 
 `--snapshot` composes exactly what the window shows and writes it to a file: handy for bug
 reports and for documenting a setup. The viewer holds the serial port while it is open, so
@@ -195,7 +254,7 @@ Diagnostic commands (`LISTEN`, `PROBE`, `START REF`, `START AN`, `ALIGN`, `CLKME
 ## Tests
 
 ```bash
-uv run pytest          # 53 tests, none needing hardware
+uv run pytest          # 68 tests, none needing hardware
 ```
 
 | File | Covers |
@@ -206,6 +265,7 @@ uv run pytest          # 53 tests, none needing hardware
 | `test_golden.py` | the reference capture: row pitch, start/stop bits, noise, mono, registers, the gap defect |
 | `test_sources.py` | replay path resolution, the synthetic fallback, lossless replay round-trip |
 | `test_device.py` | the `Device` command/reply logic against a simulated serial port |
+| `test_regs.py` | the register model: field layout, round trips, exposure maths against the firmware and the device |
 
 Tests needing the 434 MB capture skip cleanly when it is absent. `test_unpack.py` parses the
 generated `golden_vector.h` so the Python decoder is held to the exact data the device's

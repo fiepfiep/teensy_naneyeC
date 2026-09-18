@@ -34,7 +34,8 @@ Terms used across these pages, in plain words. Datasheet references are to DS000
 
 **First frame**
 : The first frame after power-up or leaving idle is overexposed, so the firmware always
-  discards it (datasheet §6.3.2.2, confirmed by measurement).
+  discards it (datasheet §6.3.2.2, confirmed by measurement). Nobody looks their best
+  first thing in the morning.
 
 **Frame phases**
 : Each frame is a fixed sequence: **interface window** (648 PP), **SYNC** (656 PP of
@@ -120,4 +121,4 @@ Terms used across these pages, in plain words. Datasheet references are to DS000
 
 **Watchdog**
 : A hardware timer that resets the Teensy if the firmware stops responding for 2 s. `ID`
-  reports whether the last reset came from it.
+  reports whether the last reset came from it. It does not accept excuses.

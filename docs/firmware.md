@@ -245,7 +245,7 @@ them is needed for normal streaming. All except `ID` and `SELFTEST` need streami
 | `START AN` | AN000611's single-write sequence. Known not to work reliably on this board (and 2 clocks off when it does); kept for comparison | Re-testing that finding |
 | `ALIGN n` | Alignment clocks used by `START AN` (datasheet: 10) | Only with `START AN` |
 | `CLKMEAS` | Measures SCLK on the pin, sensor off | After touching the clock tree |
-| `WDTEST` | Hangs on purpose; the watchdog must reset the board within 2 s | Proving the watchdog still works |
+| `WDTEST` | Hangs on purpose; the watchdog must reset the board within 2 s. The only command that succeeds by making the device disappear | Proving the watchdog still works |
 
 Host-side companions, all driving the Saleae through its MCP server:
 

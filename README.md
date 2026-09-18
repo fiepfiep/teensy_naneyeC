@@ -9,6 +9,9 @@ through a Teensy 4.1, over the sensor's half-duplex single-ended interface (SEIM
 0 failed rows. Below the image are the frame statistics, the exposure and register
 settings, and the histogram.*
 
+Developed and brought up on the bench by Claude, working in Claude Code with a person on
+the hardware: see [How this was built with Claude](docs/built-with-claude.md).
+
 **New here?** Follow [Getting started](docs/getting-started.md): parts, wiring, flashing
 and your first image, with a troubleshooting table. The full documentation is published at
 <https://fiepfiep.github.io/teensy_naneyeC/>. [spec.md](spec.md) is the living design
@@ -34,7 +37,7 @@ It is published to <https://fiepfiep.github.io/teensy_naneyeC/> by
 | | |
 |---|---|
 | Reference capture decoded | done: 7 frames, every start/stop bit valid |
-| Host decode, transport, recorder, viewer | done; 53 tests passing, no hardware required |
+| Host decode, transport, recorder, viewer | done; 68 tests passing, no hardware required |
 | Start-up and row lock | reliable: reference start sequence plus a bit-level row lock |
 | 12.375 MHz | 0 failed rows, 8.4 fps |
 | 24.75 MHz | 0 failed rows, 0 dropped over 200 frames, **17.9 fps** |
@@ -65,7 +68,7 @@ firmware/               PlatformIO project for the Teensy 4.1
 host/naneye/            decoder, transport, sources, viewer, recorder, Saleae client
 tools/                  golden-capture decoder, test-vector generator, Saleae
                         bring-up tools (show_bringup, check_alignment, capture/analyze_link)
-tests/                  53 tests, no hardware required
+tests/                  68 tests, no hardware required
 ```
 
 ## The reference capture
@@ -90,7 +93,7 @@ The host side is managed with [uv](https://docs.astral.sh/uv/):
 ```bash
 uv sync                                    # create the environment from uv.lock
 uv run python tools/decode_golden.py       # decode the reference capture (~50 s first run)
-uv run pytest                              # 53 tests
+uv run pytest                              # 68 tests
 uv run --group firmware python -m platformio run -d firmware  # build the firmware
 ```
 
