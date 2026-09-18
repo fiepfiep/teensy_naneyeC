@@ -1,7 +1,7 @@
 # Firmware architecture
 
 Teensy 4.1 (i.MX RT1062, 600 MHz), PlatformIO + Teensyduino, with direct register access for
-LPSPI, DMA and IOMUXC. Build: `uv run python -m platformio run -d firmware`.
+LPSPI, DMA and IOMUXC. Build: `uv run --group firmware python -m platformio run -d firmware`.
 
 ## Files
 
@@ -30,19 +30,25 @@ PLL, no search loop in steady state.
 
 ```
 capture_frame():
-  INTERFACE    324 frames x 24 bits, SDAT driven
-                 frame 0   CONFIG_0 write
-                 frame 1   CONFIG_1 write
-                 frames 2+ zeros (datasheet wants the bus driven)
+  INTERFACE    7776 clocks, SDAT driven
+                 24 bits   CONFIG_0 write
+                 24 bits   CONFIG_1 write
+                 7728 bits zeros, in two large frames
+                           (the datasheet wants the bus driven throughout)
   [SDAT -> hi-Z]
   SYNC+DELAY   (656 + rows_delay_pp) PP, clocked and discarded
   READOUT      320 x 3936 bits, DMA'd and unpacked
   EOF          8 PP, discarded
 ```
 
-Note how cleanly the arithmetic lands: 648 PP = 7776 bits = **324 × 24 bits exactly**, so
-the interface window is a whole number of register-sized frames. SYNC+DELAY at minimum delay
-is 4 × 3936 bits, exactly four row-times.
+Note how cleanly the arithmetic lands: 648 PP = 7776 bits = 324 × 24 exactly, so a register
+write is a whole number of pixel periods; and SYNC+DELAY at minimum delay is 4 × 3936 bits,
+exactly four row-times.
+
+The filler is driven as **two maximum-size frames rather than 322 small ones**. The sensor
+counts clocks, not time, so gaps inside the interface window do not break alignment — but
+wall-clock time spent there is time the pixels keep integrating, so 322 inter-frame gaps
+would stretch the real exposure beyond what the formula predicts.
 
 ## Why one row per SPI frame
 
@@ -112,12 +118,22 @@ static inline void sdat_drive() { *portConfigRegister(PIN_SDAT_OUT) = s_mux_sdat
 static inline void sdat_hiz()   { pinMode(PIN_SDAT_OUT, INPUT); }
 ```
 
-`SPI1.begin()` does the pin muxing once at startup; the mux values for SDO and SCK are
-cached so the direction flip and the hand-back after bit-banging are single register writes.
+`SPI1.begin()` does the pin muxing once at startup; the mux **and pad control** values for
+SDO and SCK are cached, so the direction flip and the hand-back after bit-banging are single
+register writes. The pad registers matter because `pinMode()` overwrites drive strength and
+slew, which at 49.5 MHz is not something to leave to chance.
 
 Bit-banging exists because LPSPI cannot produce frames shorter than 8 bits, and the start-up
 sequence needs exactly **1** activation clock and then **10** alignment clocks. The
 reference host bit-banged these too.
+
+!!! warning "The alignment clocks must not drive SDAT"
+    `bitbang_clocks()` takes an explicit `drive_sdat` flag. The activation clock is sent
+    with SDAT driven low, as the reference host does. The 10 alignment clocks are **not**:
+    they come after idle mode is cleared, by which point the sensor has entered INITIAL
+    PRE-SYNC and is driving SDAT itself. Driving it then is bus contention, and the
+    datasheet makes releasing the upstream driver before the sensor transmits the host's
+    responsibility. This was a real bug, found in review rather than on hardware.
 
 ## Buffering and the rule that must not be broken
 
@@ -159,9 +175,13 @@ useless.
 
 ## Commands
 
-Plain text lines, so the port is usable from a terminal; the device also accepts framed
-type-1 packets. Device output is always framed. Full list in `main.cpp::handle_command` and
-the [host page](host.md#commands).
+Plain ASCII lines in, always-framed packets out (spec.md §7). Full list in
+`main.cpp::handle_command` and the [host page](host.md#commands).
+
+Commands are polled between frames, not during one, because `capture_frame()` owns the CPU
+for the whole readout. So expect up to one frame period of latency — ~52 ms at 24.75 MHz,
+~104 ms at 12.375 MHz. That is deliberate: handling `START`, `STOP` or `PROBE` halfway
+through a readout would re-enter the driver underneath itself.
 
 The two that matter during bring-up:
 

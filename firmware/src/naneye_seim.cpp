@@ -40,7 +40,8 @@ inline uint32_t framesz(uint32_t bits) { return (bits - 1u) & 0xFFFu; }
 constexpr uint32_t MAX_FRAME_BITS = 4092;                    // 341 PP
 constexpr uint32_t ROW_BITS = ROW_PP * PP_BITS;              // 3936
 constexpr uint32_t INTERFACE_BITS = INTERFACE_PP * PP_BITS;  // 7776
-constexpr uint32_t INTERFACE_FRAMES = INTERFACE_BITS / 24;   // 324, exactly
+constexpr uint32_t REG_WRITE_BITS = 24;                      // one register write = 2 PP
+constexpr uint32_t INTERFACE_FRAMES = INTERFACE_BITS / REG_WRITE_BITS;  // 324, exact
 constexpr uint32_t EOF_BITS = EOF_PP * PP_BITS;              // 96
 
 // Spin limit for the hardware waits: generous enough never to trip in normal operation,
@@ -62,6 +63,8 @@ static uint16_t s_cfg1 = REF_CONFIG1_IDLE;
 static const ClockSetting* s_clock = &CLOCKS[0];
 static uint32_t s_mux_sdat = 0;  // IOMUX value connecting pin 26 to LPSPI3_SDO
 static uint32_t s_mux_sclk = 0;  // IOMUX value connecting pin 27 to LPSPI3_SCK
+static uint32_t s_pad_sdat = 0;  // pad control (drive, slew) as SPI1.begin() left it
+static uint32_t s_pad_sclk = 0;
 
 // --- SDAT direction (spec.md section 4.3) ----------------------------------------------
 // Pin 26 drives during INTERFACE MODE and is a hi-Z input otherwise; pin 1 always reads.
@@ -89,6 +92,27 @@ static bool clock_pp_discard(uint32_t pp) {
     while (bits) {
         uint32_t chunk = bits > MAX_FRAME_BITS ? MAX_FRAME_BITS : bits;
         LPSPI.TCR = tcr_base() | reg::framesz(chunk) | reg::TCR_TXMSK | reg::TCR_RXMSK;
+        if (!wait_frame()) return false;
+        bits -= chunk;
+    }
+    return true;
+}
+
+// Drive `bits` clocks with SDAT held at zero, in as few LPSPI frames as possible.
+// The datasheet asks for the bus to stay driven for the whole interface window; doing that
+// as 322 separate 24-bit frames would add 322 inter-frame gaps, and wall-clock time spent
+// in the interface window is time the pixels keep integrating.
+static bool drive_zeros(uint32_t bits) {
+    while (bits) {
+        uint32_t chunk = bits > MAX_FRAME_BITS ? MAX_FRAME_BITS : bits;
+        LPSPI.TCR = tcr_base() | reg::framesz(chunk) | reg::TCR_RXMSK;
+        for (uint32_t sent = 0; sent < chunk; sent += 32) {
+            uint32_t guard = 0;
+            while (!(LPSPI.SR & reg::SR_TDF)) {
+                if (++guard > SPIN_LIMIT) return false;
+            }
+            LPSPI.TDR = 0;
+        }
         if (!wait_frame()) return false;
         bits -= chunk;
     }
@@ -138,23 +162,36 @@ static void configure_lpspi() {
     LPSPI.CR = reg::CR_MEN;
 }
 
-// Bit-bang `n` clocks with SDAT held low. LPSPI cannot make frames shorter than 8 bits and
-// the start-up sequence needs exactly 1 and then 10 clocks (AN000611 section 3.3). The
-// reference host bit-banged these too (spec.md section 3.2).
-static void bitbang_clocks(uint32_t n) {
+// Bit-bang `n` clocks. LPSPI cannot make frames shorter than 8 bits, and the start-up
+// sequence needs exactly 1 and then 10 clocks (AN000611 section 3.3). The reference host
+// bit-banged these too (spec.md section 3.2).
+//
+// drive_sdat MUST be false once idle mode has been cleared: by then the sensor has entered
+// INITIAL PRE-SYNC MODE and is driving SDAT itself, and the datasheet makes tristating the
+// upstream driver before that point the host's responsibility.
+static void bitbang_clocks(uint32_t n, bool drive_sdat) {
     pinMode(board::PIN_SCLK, OUTPUT);
-    pinMode(board::PIN_SDAT_OUT, OUTPUT);
     digitalWriteFast(board::PIN_SCLK, LOW);
-    digitalWriteFast(board::PIN_SDAT_OUT, LOW);
+    if (drive_sdat) {
+        pinMode(board::PIN_SDAT_OUT, OUTPUT);
+        digitalWriteFast(board::PIN_SDAT_OUT, LOW);
+    } else {
+        sdat_hiz();
+    }
     for (uint32_t i = 0; i < n; i++) {
         delayNanoseconds(200);
         digitalWriteFast(board::PIN_SCLK, HIGH);
         delayNanoseconds(200);
         digitalWriteFast(board::PIN_SCLK, LOW);
     }
-    // Hand the pins back to LPSPI without disturbing its configuration.
+    // Hand SCLK back to LPSPI, restoring the pad settings pinMode() overwrote as well as
+    // the mux: at 49.5 MHz the drive strength and slew configured by SPI1.begin() matter.
+    *portControlRegister(board::PIN_SCLK) = s_pad_sclk;
     *portConfigRegister(board::PIN_SCLK) = s_mux_sclk;
-    *portConfigRegister(board::PIN_SDAT_OUT) = s_mux_sdat;
+    if (drive_sdat) {
+        *portControlRegister(board::PIN_SDAT_OUT) = s_pad_sdat;
+        *portConfigRegister(board::PIN_SDAT_OUT) = s_mux_sdat;
+    }
 }
 
 // --- Setup -----------------------------------------------------------------------------
@@ -177,6 +214,8 @@ void begin() {
     SPI1.begin();
     s_mux_sdat = *portConfigRegister(board::PIN_SDAT_OUT);
     s_mux_sclk = *portConfigRegister(board::PIN_SCLK);
+    s_pad_sdat = *portControlRegister(board::PIN_SDAT_OUT);
+    s_pad_sclk = *portControlRegister(board::PIN_SCLK);
 
     s_rx.begin();
     s_rx.source((volatile uint32_t&)LPSPI.RDR);
@@ -234,7 +273,7 @@ static void interface_window(uint16_t cfg0, uint16_t cfg1) {
     sdat_drive();
     send24(reg_write_packet(0, cfg0));
     send24(reg_write_packet(1, cfg1));
-    for (uint32_t i = 2; i < INTERFACE_FRAMES; i++) send24(0);
+    drive_zeros(INTERFACE_BITS - 2 * REG_WRITE_BITS);
     sdat_hiz();
 }
 
@@ -252,7 +291,7 @@ bool start() {
 
     // INITIAL INTERFACE MODE: one activation clock, then select SEIM with idle still on, as
     // the reference host does (spec.md section 3.2).
-    bitbang_clocks(1);
+    bitbang_clocks(1, true);  // activation clock, SDAT low as in the reference capture
     c1.idle_mode = 1;
     sdat_drive();
     send24(reg_write_packet(0, s_cfg0));
@@ -266,8 +305,9 @@ bool start() {
     send24(reg_write_packet(1, s_cfg1));
     sdat_hiz();
 
-    // 10 alignment clocks fix the 12-bit word phase, then INITIAL PRE-SYNC MODE.
-    bitbang_clocks(10);
+    // 10 alignment clocks fix the 12-bit word phase, then INITIAL PRE-SYNC MODE. SDAT is
+    // left released: the sensor is already transmitting by this point.
+    bitbang_clocks(10, false);
     if (!clock_pp_discard(PRESYNC_PP)) return false;
 
     // SYNC + DELAY, then the first frame, which is discarded: its exposure is invalid
@@ -308,6 +348,7 @@ bool capture_frame(uint8_t* dst, uint8_t format, FrameInfo& info, IdleFn idle) {
     for (uint32_t r = 0; r < HEIGHT; r++) {
         uint32_t* cur = s_row[r & 1];
         if (!wait_row()) {
+            s_rx.disable();  // do not leave a transfer armed for a later stray request
             info.rows_failed += HEIGHT - r;
             return false;
         }
@@ -345,7 +386,10 @@ void probe_sync(SyncReport& report, uint32_t rows) {
 
     for (uint32_t r = 0; r < rows; r++) {
         start_row(s_row[0]);
-        if (!wait_row()) return;
+        if (!wait_row()) {
+            s_rx.disable();
+            return;
+        }
         for (uint32_t i = 0; i < ROW_PP; i++) {
             const uint16_t w = pp_at(s_row[0], i);
             if (report.words < 16) report.first_words[report.words] = w;

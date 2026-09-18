@@ -6,6 +6,10 @@
 // (and counted) if the host cannot keep up. A frame is never truncated.
 
 #include <Arduino.h>
+#include <ctype.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "board.h"
@@ -136,8 +140,11 @@ static void handle_command(char* line) {
         reply("POWER %d", seim::powered() ? 1 : 0);
     } else if (!strcmp(tok[0], "CLK")) {
         const ClockSetting& c = seim::set_clock(parse_u32(tok[1], 12375000u));
-        reply("CLK %lu Hz  sckdiv=%u mclk_mode=%u high_speed=%u",
-              (unsigned long)c.sclk_hz, c.sckdiv, c.mclk_mode, c.high_speed);
+        reply("CLK %lu Hz  sckdiv=%u mclk_mode=%u high_speed=%u%s",
+              (unsigned long)c.sclk_hz, c.sckdiv, c.mclk_mode, c.high_speed,
+              s_run ? "  (restart with START: the sensor only sees the new mclk_mode at the"
+                      " next interface window, so one frame will be mismatched)"
+                    : "");
     } else if (!strcmp(tok[0], "SAMPLE")) {
         seim::set_delayed_sample(parse_u32(tok[1], 0) != 0);
         reply("SAMPLE %d", seim::delayed_sample() ? 1 : 0);
@@ -156,9 +163,16 @@ static void handle_command(char* line) {
         reply("STOP");
     } else if (!strcmp(tok[0], "DEPTH")) {
         const uint32_t d = parse_u32(tok[1], 8);
-        s_format = (d == 10) ? proto::FMT_GRAY10 : (d == 12) ? proto::FMT_RAW12
-                                                             : proto::FMT_GRAY8;
-        reply("DEPTH %u  payload=%u bytes/frame", d, (unsigned)frame_payload_bytes(s_format));
+        if (d != 8 && d != 10 && d != 12) {
+            reply("DEPTH must be 8, 10 or 12; unchanged (currently %s)",
+                  s_format == proto::FMT_GRAY10 ? "10" : s_format == proto::FMT_RAW12 ? "12"
+                                                                                      : "8");
+        } else {
+            s_format = (d == 10) ? proto::FMT_GRAY10
+                                 : (d == 12) ? proto::FMT_RAW12 : proto::FMT_GRAY8;
+            reply("DEPTH %u  payload=%u bytes/frame", d,
+                  (unsigned)frame_payload_bytes(s_format));
+        }
     } else if (!strcmp(tok[0], "EXP")) {
         Config0 c0 = Config0::unpack(seim::config0());
         Config1 c1 = Config1::unpack(seim::config1());
@@ -192,9 +206,16 @@ static void handle_command(char* line) {
     } else if (!strcmp(tok[0], "REG")) {
         const uint32_t addr = parse_u32(tok[1], 0);
         const uint32_t val = parse_u32(tok[2], 0);
-        if (addr == 0) seim::set_config((uint16_t)val, seim::config1());
-        else seim::set_config(seim::config0(), (uint16_t)val);
-        reply("REG %lu = 0x%04X", (unsigned long)addr, (unsigned)val);
+        if (addr > 1) {
+            reply("REG address must be 0 (CONFIG_0) or 1 (CONFIG_1); only those exist");
+        } else if (val > 0xFFFF) {
+            reply("REG value must fit 16 bits");
+        } else {
+            if (addr == 0) seim::set_config((uint16_t)val, seim::config1());
+            else seim::set_config(seim::config0(), (uint16_t)val);
+            reply("REG %lu = 0x%04X (takes effect next frame)", (unsigned long)addr,
+                  (unsigned)val);
+        }
     } else if (!strcmp(tok[0], "LED")) {
         led::set_enabled(parse_u32(tok[1], 0) != 0);
         reply("LED %d  current=%.2f mA (limit %.2f mA)", led::enabled() ? 1 : 0,

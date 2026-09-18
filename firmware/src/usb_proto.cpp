@@ -22,6 +22,7 @@ void crc32_init() {
 }
 
 uint32_t crc32_update(uint32_t crc, const void* data, size_t len) {
+    if (!crc_ready) crc32_init();  // once per call, not per byte
     const uint8_t* p = (const uint8_t*)data;
     while (len--) crc = crc_table[(crc ^ *p++) & 0xFFu] ^ (crc >> 8);
     return crc;
@@ -73,17 +74,23 @@ bool send(const Header& h, const void* payload, size_t payload_len) {
 }
 
 void send_text(uint8_t type, const char* fmt, ...) {
-    char buf[256];
+    // One contiguous packet: header then text, so a partial write cannot split them.
+    static uint8_t packet[sizeof(Header) + 256];
+    char* text = (char*)packet + sizeof(Header);
+    const size_t room = sizeof(packet) - sizeof(Header);
+
     va_list ap;
     va_start(ap, fmt);
-    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    int n = vsnprintf(text, room, fmt, ap);
     va_end(ap);
     if (n < 0) return;
-    if (n > (int)sizeof(buf)) n = (int)sizeof(buf);
-    Header h;
-    header_init(h, type, (uint32_t)n);
-    header_finish(h, buf, (size_t)n);
-    send(h, buf, (size_t)n);
+    // vsnprintf returns the length it *wanted*; clamp to what it actually wrote.
+    size_t len = ((size_t)n >= room) ? room - 1 : (size_t)n;
+
+    Header* h = (Header*)packet;
+    header_init(*h, type, (uint32_t)len);
+    header_finish(*h, text, len);
+    write_all(packet, sizeof(Header) + len, 100);
 }
 
 }  // namespace proto

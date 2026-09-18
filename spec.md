@@ -419,8 +419,13 @@ Defaults will be chosen from measured black level and saturation (M6).
 
 ## 7. USB protocol
 
-Single USB CDC serial port (one COM port, no driver questions on Windows 11). One framed
-binary transport in both directions, so ASCII log output can never corrupt frame parsing.
+Single USB CDC serial port (one COM port, no driver questions on Windows 11).
+
+**Device to host is always framed**, images and text alike, so log output can never be
+mistaken for image data. **Host to device is plain ASCII lines**, which keeps the port
+usable from a plain terminal. The asymmetry is deliberate: framing matters for the
+high-rate direction that has to be parsed by machine, and costs nothing in the direction a
+human types into. The `command` packet type is reserved in case that changes.
 
 ```
 offset size field

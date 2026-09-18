@@ -163,7 +163,8 @@ with Device.open_first() as dev:
 
 ## Commands
 
-Sent as plain text lines; replies come back framed.
+Sent as plain text lines; replies come back framed. Commands are processed between frames,
+so a reply can take up to one frame period to arrive while streaming.
 
 ```
 ID                      firmware version and current settings

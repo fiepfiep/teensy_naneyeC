@@ -8,7 +8,8 @@ Read this before "correcting" something in the code to match a datasheet table. 
 the differences are deliberate, and two of them exist because the datasheet contradicts
 itself or contradicts measurement.
 
-Reviewed 2026-09-18 against commit `c0e22e9`. Method: re-read each datasheet passage the
+Reviewed 2026-09-18, in two passes: constants and formulas first, then the driver
+internals and the USB API (§8). Method: re-read each datasheet passage the
 code depends on, then check the corresponding constant, bitfield or formula.
 
 ## 1. Verified as matching
@@ -177,7 +178,59 @@ separately instead of just "valid pixels".
 
 Items 1 and 2 are datasheet-compliance bugs; 3–5 are why "the viewer won't run".
 
-## 8. Still unverifiable without hardware
+## 8. Firmware and USB API review
+
+A second pass, over the driver internals and the protocol rather than the constants.
+
+### Bus contention on the alignment clocks — the significant one
+
+`start()` cleared idle mode, released SDAT, and then called `bitbang_clocks(10)` for the
+alignment clocks. But that function unconditionally drove SDAT low. By then the sensor has
+entered INITIAL PRE-SYNC MODE and is **transmitting**, so we would have been driving the
+line against its output driver — precisely what §6.3.2.2's caution makes the host's
+responsibility to avoid.
+
+`bitbang_clocks()` now takes an explicit `drive_sdat`: true for the activation clock (SDAT
+low, as the reference host does), false for the alignment clocks. Worth noting how this
+would have presented on hardware: not as a clean failure, but as a sensor that sometimes
+syncs and sometimes does not, depending on drive strengths — the kind of fault that gets
+blamed on wiring for a day.
+
+### Interface window: 324 frames to 4
+
+The filler was 322 separate 24-bit LPSPI frames. The sensor counts clocks rather than time,
+so the gaps between them do not break alignment — but wall-clock time spent in the interface
+window *is* integration time, so 322 gaps would stretch the real exposure past what the
+formula predicts. The filler now goes out as two maximum-size frames.
+
+### Other fixes
+
+| Area | Problem | Fix |
+|---|---|---|
+| `bitbang_clocks` | Restored only the pin mux, not the pad control register, so `pinMode()`'s drive strength and slew survived the hand-back to LPSPI | Cache and restore both |
+| `capture_frame`, `probe_sync` | A row timeout returned with the next row's DMA still armed, leaving a channel live for a later stray request | `s_rx.disable()` on the error path |
+| `send_text` | `vsnprintf` returns the length it *wanted*, so a truncated message set `payload_len` one byte beyond what was written | Clamp to what was actually written |
+| `send_text` | Wrote the header and text as two calls, so a stalled host could leave half a text packet in the stream | Build one contiguous packet and write it in a single call |
+| `crc32_update` | Silently produced wrong CRCs if `crc32_init()` had not run | Lazy init, once per call rather than per byte |
+| `REG` | Any address above 0 was treated as CONFIG_1, and values wider than 16 bits were truncated silently | Reject both, since only two registers exist |
+| `DEPTH` | `DEPTH 99` fell back to gray8 but *reported* 99 | Reject unknown values and leave the format alone |
+| `CLK` | Changing the clock mid-stream leaves one frame whose internal MCLK does not match | Still allowed, but the reply now says to restart |
+
+### Deliberate behaviours, not defects
+
+- **Commands are polled between frames, never during one.** `capture_frame()` owns the CPU
+  for the whole readout, so a command can wait up to one frame period (~52 ms at 24.75 MHz).
+  Handling `START` or `PROBE` mid-readout would re-enter the driver underneath itself.
+- **Host to device is ASCII, device to host is framed.** The spec originally claimed framing
+  in both directions and the firmware never implemented it; rather than add a parser nothing
+  needs, the asymmetry is now documented as the intent. Framing earns its keep in the
+  machine-parsed direction and costs nothing in the direction a human types into. The
+  `command` packet type stays reserved.
+- **A frame is dropped whole rather than truncated**, and USB disconnection mid-payload can
+  still leave a partial packet on the wire. The host recovers by resynchronising on the
+  magic word and verifying the CRC, which `tests/test_transport.py` covers directly.
+
+## 9. Still unverifiable without hardware
 
 - The three LPSPI risks in the [firmware page](firmware.md#known-risks): receive-only
   framing via `TXMSK`, SDAT release timing, and the clock accounting in `start()`.
