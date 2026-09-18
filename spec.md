@@ -31,7 +31,7 @@ dropped-frame accounting, deterministic exposure/gain control, and lossless fram
 | D5 | Bit depth | Runtime-selectable 8-bit / 10-bit |
 | D6 | Clock rate | **Start low: 12.375 MHz, then 24.75 MHz.** Higher rates are a stretch goal |
 | D7 | Illumination | On/off **plus DAC current control** (bit-banged, §4.4). Kept minimal: set current in mA, clamped |
-| D8 | Board population | All components mounted, incl. R23 (schematic "NoBom" markings are stale) |
+| D8 | Board population | R23 mounted (so SDAT reaches the sensor). **R13 and R33 — the 10k header pull-downs on SDAT and SCLK — are not fitted**, as the schematic's NoBom marking says; firmware substitutes the pads' internal pull-downs (§4.3). The first answer here was "everything is mounted", corrected 2026-09-18 |
 | D9 | 5 V rail | Teensy VUSB |
 | D10 | Teensy pins | Claude's choice; nothing reserved |
 
@@ -179,8 +179,23 @@ Sensor power is negligible (9.7 mW in SEIM). LED draw is bounded by the DAC ceil
 
 SDAT is driven by the Teensy during INTERFACE MODE and by the sensor at all other times.
 The datasheet is explicit that the host **must** tristate before the sensor starts
-transmitting, and also recommends actively driving the bus for the whole 648 PP interface
-window to avoid EMI pickup.
+transmitting, and recommends driving the bus through the interface window to avoid EMI
+pickup on a floating line.
+
+Two refinements, both from reading the datasheet against the board rather than from
+hardware:
+
+- **The host drives 647 of the 648 PP, not all of them.** DS000503 §6.4.3 says the sensor
+  itself transmits an end-of-interface word (0x015 in SEIM) in the last PP, which is also
+  why register writes are forbidden there. AN000611's recipe drives all 648. The reference
+  capture cannot settle it, because the host's GPIO would out-drive the sensor's
+  current-limited output either way. Releasing costs nothing if the sensor is silent and
+  avoids a fight every frame if not; the firmware receives that PP and reports it, so M2
+  settles the question.
+- **R13 and R33 are not fitted** (D8), and the SPI pads are configured with no pull, so
+  both nets would float whenever undriven. The firmware enables the pads' internal 100k
+  pull-downs on SCLK and both SDAT pins. SCLK matters most: a floating clock while the
+  sensor is powered could inject a spurious edge and slip word alignment.
 
 **Primary scheme (deterministic):** two Teensy pins tied together at the header —
 pin 26 (`LPSPI3_SDO`) and pin 1 (`LPSPI3_SDI`). Direction is one IOMUXC write:

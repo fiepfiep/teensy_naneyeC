@@ -235,15 +235,19 @@ static void handle_command(char* line) {
               (unsigned long)rep.words, (unsigned long)rep.training_555,
               (unsigned long)rep.training_AAA, (unsigned long)rep.zeros,
               (unsigned long)rep.pixel_like);
+        reply("PROBE end-of-interface PP: 0x%03X  (datasheet says the sensor sends 0x015; "
+              "0x000 means it stays silent)",
+              seim::last_interface_pp());
         reply("PROBE first: %03X %03X %03X %03X %03X %03X %03X %03X %03X %03X",
               rep.first_words[0], rep.first_words[1], rep.first_words[2], rep.first_words[3],
               rep.first_words[4], rep.first_words[5], rep.first_words[6], rep.first_words[7],
               rep.first_words[8], rep.first_words[9]);
     } else if (!strcmp(tok[0], "STATS")) {
-        reply("STATS frames=%lu sent=%lu dropped=%lu streaming=%d powered=%d",
+        reply("STATS frames=%lu sent=%lu dropped=%lu streaming=%d powered=%d "
+              "end_of_interface=0x%03X",
               (unsigned long)s_frame_counter, (unsigned long)s_frames_sent,
               (unsigned long)s_frames_dropped, seim::streaming() ? 1 : 0,
-              seim::powered() ? 1 : 0);
+              seim::powered() ? 1 : 0, seim::last_interface_pp());
     } else if (!strcmp(tok[0], "SELFTEST")) {
         selftest();
     } else {

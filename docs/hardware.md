@@ -29,6 +29,32 @@ Pin choices are in `firmware/src/board.h`. LPSPI3 ("SPI1") fixes 27/26/1; LPSPI3
 over the default LPSPI4 to keep a 12–50 MHz clock off pin 13 and its onboard LED
 capacitance.
 
+### R13 and R33 are not fitted
+
+The schematic marks R13 and R33 NoBom, and on this board they are indeed absent. They are
+10k pull-downs on the header side of the SDAT and SCLK series resistors, there to hold both
+nets low whenever nothing drives them. Without them, and with `SPI1.begin()` configuring the
+pads as `DSE(7) | SPEED(2)` — no pull at all — both nets float when undriven.
+
+| Net | Floats when | Why it matters |
+|---|---|---|
+| SCLK | before `seim::begin()`, and while LPSPI is reset or reconfigured (`CLK`, `SAMPLE`) | The sensor advances on clock edges. Noise on a floating SCLK while the sensor is powered can inject an edge and slip the 12-bit word alignment for the rest of the session, with no error until rows start failing validation |
+| SDAT | after `STOP`, before `START`, at every hand-over between drivers | Less dangerous — the sensor samples SDAT only on clock edges — but a floating CMOS input is untidy and the datasheet specifically warns about EMI pickup |
+
+**The firmware now enables the i.MX RT pads' internal 100k pull-downs** on pin 27 (SCLK) and
+on both SDAT pins (26 and 1), applied after `SPI1.begin()` and preserved across the
+bit-bang hand-backs. No hardware change is needed.
+
+The internal pull-down is ten times weaker than the 10k the board was designed for. That
+still defines the DC level, which is what matters here, but it settles more slowly
+(100k × ~35 pF ≈ 3.5 µs) and holds less firmly against coupled noise. If you see SCLK or
+SDAT wander on the Saleae while idle, **fit 10k at R13 and R33** — the pads are on the
+board. Loading is not a concern at that value: 0.33 mA against a sensor driver of 3.9–9.6 mA.
+
+It is worth confirming the two parts this design leans on hardest while you have the
+magnifier out: **R23** (without it SDAT does not reach the sensor at all) and **R19** (the
+10k pull-down that keeps the sensor unpowered until the Teensy drives `NanEye_EN`).
+
 ### Recommended: a series resistor on pin 26
 
 Fit **100 Ω in series at pin 26**, close to the pin. Not on pin 27, and **not on pin 1**.
@@ -229,6 +255,9 @@ the shape you want.
 | all `0xFFF` | SDAT stuck high, or we never released the bus (direction switch failed) |
 | plausible but non-training words | word alignment is off — suspect the activation/alignment clock counts in `seim::start()` |
 | `0xAAA` when expecting `0x555` | this is the first frame after power-on; normal |
+| `end-of-interface PP: 0x015` | the datasheet is right that the sensor drives the last interface PP — releasing it avoided contention every frame |
+| `end-of-interface PP: 0x000` | the sensor stays silent there; AN000611's drive-all-648 recipe would have been harmless |
+| `end-of-interface PP` anything else | phase accounting is off by some bits — fix this before trusting any image ([why](datasheet-crosscheck.md#9-board-population-and-who-owns-sdat-in-the-last-pp)) |
 
 ### M3 — first frame
 

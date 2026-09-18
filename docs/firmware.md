@@ -30,12 +30,12 @@ PLL, no search loop in steady state.
 
 ```
 capture_frame():
-  INTERFACE    7776 clocks, SDAT driven
-                 24 bits   CONFIG_0 write
-                 24 bits   CONFIG_1 write
-                 7728 bits zeros, in two large frames
-                           (the datasheet wants the bus driven throughout)
-  [SDAT -> hi-Z]
+  INTERFACE    7776 clocks
+                 24 bits   CONFIG_0 write          SDAT driven
+                 24 bits   CONFIG_1 write          SDAT driven
+                 7716 bits zeros, two frames       SDAT driven (keeps EMI off the line)
+               [SDAT -> released, pulled down]
+                 12 bits   last PP, received       the sensor's end-of-interface word
   SYNC+DELAY   (656 + rows_delay_pp) PP, clocked and discarded
   READOUT      320 x 3936 bits, DMA'd and unpacked
   EOF          8 PP, discarded
@@ -44,6 +44,12 @@ capture_frame():
 Note how cleanly the arithmetic lands: 648 PP = 7776 bits = 324 × 24 exactly, so a register
 write is a whole number of pixel periods; and SYNC+DELAY at minimum delay is 4 × 3936 bits,
 exactly four row-times.
+
+The **last pixel period is left to the sensor**, which the datasheet says transmits an
+end-of-interface word there, and is received rather than discarded so bring-up can see
+whether it does. As a side effect SDAT is released a full PP before SYNC begins, so there is
+no overlap at the phase boundary at all. See
+[SEIM reference](seim.md#registers) for why this departs from AN000611.
 
 The filler is driven as **two maximum-size frames rather than 322 small ones**. The sensor
 counts clocks, not time, so gaps inside the interface window do not break alignment — but

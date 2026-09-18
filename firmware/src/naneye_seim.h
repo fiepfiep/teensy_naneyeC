@@ -79,4 +79,10 @@ struct SyncReport {
 };
 void probe_sync(SyncReport& report, uint32_t rows);
 
+// The word received in the final pixel period of the most recent INTERFACE MODE, which the
+// driver leaves undriven for the sensor. The datasheet says the sensor sends 0x015 there;
+// AN000611 implies it does not. 0x000 means silent (SDAT is pulled down), 0xFFFF means no
+// frame has run yet. Bring-up (M2) should settle which.
+uint16_t last_interface_pp();
+
 }  // namespace seim

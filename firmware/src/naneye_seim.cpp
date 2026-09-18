@@ -19,6 +19,8 @@ constexpr uint32_t CR_RST = 1u << 1;
 constexpr uint32_t CR_RTF = 1u << 8;  // reset transmit FIFO
 constexpr uint32_t CR_RRF = 1u << 9;  // reset receive FIFO
 
+constexpr uint32_t RSR_RXEMPTY = 1u << 1;  // receive FIFO empty
+
 constexpr uint32_t SR_TDF = 1u << 0;
 constexpr uint32_t SR_FCF = 1u << 9;   // frame complete
 constexpr uint32_t SR_REF = 1u << 12;  // receive error (FIFO overflow)
@@ -65,12 +67,34 @@ static uint32_t s_mux_sdat = 0;  // IOMUX value connecting pin 26 to LPSPI3_SDO
 static uint32_t s_mux_sclk = 0;  // IOMUX value connecting pin 27 to LPSPI3_SCK
 static uint32_t s_pad_sdat = 0;  // pad control (drive, slew) as SPI1.begin() left it
 static uint32_t s_pad_sclk = 0;
+// What arrived on SDAT in the final pixel period of the last INTERFACE MODE, which we leave
+// to the sensor (see interface_window). 0xFFFF until the first frame has run.
+static uint16_t s_last_interface_pp = 0xFFFF;
+
+// The NanoBerry's R13 and R33 (10k pull-downs on SDAT and SCLK at the header) are not
+// fitted, and SPI1.begin() configures these pads with no pull at all, so both nets would
+// float whenever nothing drives them. A floating SCLK is the dangerous one: the sensor
+// advances its state machine on clock edges, so noise while it is powered -- for instance
+// while LPSPI is being reconfigured -- could slip the 12-bit word alignment for the rest of
+// the session. The pad's internal 100k pull-down stands in for the missing resistors.
+constexpr uint32_t PAD_PULL_MASK = IOMUXC_PAD_PKE | IOMUXC_PAD_PUE | IOMUXC_PAD_PUS(3);
+constexpr uint32_t PAD_PULLDOWN = IOMUXC_PAD_PKE | IOMUXC_PAD_PUE | IOMUXC_PAD_PUS(0);
+
+static inline void add_pulldown(uint8_t pin) {
+    volatile uint32_t* pad = portControlRegister(pin);
+    *pad = (*pad & ~PAD_PULL_MASK) | PAD_PULLDOWN;
+}
 
 // --- SDAT direction (spec.md section 4.3) ----------------------------------------------
 // Pin 26 drives during INTERFACE MODE and is a hi-Z input otherwise; pin 1 always reads.
-// TCR[TXMSK] tristates the output too, so this is belt and braces.
-static inline void sdat_drive() { *portConfigRegister(board::PIN_SDAT_OUT) = s_mux_sdat; }
-static inline void sdat_hiz() { pinMode(board::PIN_SDAT_OUT, INPUT); }
+// TCR[TXMSK] tristates the output too, so this is belt and braces. Releasing SDAT leaves it
+// pulled down rather than floating. Driving restores the pad as well as the mux, because
+// pinMode() rewrites the pad and would otherwise leave SDO at the wrong speed setting.
+static inline void sdat_drive() {
+    *portControlRegister(board::PIN_SDAT_OUT) = s_pad_sdat;
+    *portConfigRegister(board::PIN_SDAT_OUT) = s_mux_sdat;
+}
+static inline void sdat_hiz() { pinMode(board::PIN_SDAT_OUT, INPUT_PULLDOWN); }
 
 // --- Low-level frame helpers -----------------------------------------------------------
 // CPOL=0, CPHA=0: the sensor launches data ~8 ns after the rising edge and we sample on the
@@ -212,6 +236,9 @@ void begin() {
     // Let the core library mux the pins, then remember the values so the SDAT direction can
     // be flipped, and the pins reclaimed after bit-banging, with single register writes.
     SPI1.begin();
+    add_pulldown(board::PIN_SCLK);
+    add_pulldown(board::PIN_SDAT_OUT);
+    add_pulldown(board::PIN_SDAT_IN);
     s_mux_sdat = *portConfigRegister(board::PIN_SDAT_OUT);
     s_mux_sclk = *portConfigRegister(board::PIN_SCLK);
     s_pad_sdat = *portControlRegister(board::PIN_SDAT_OUT);
@@ -269,13 +296,41 @@ uint16_t config1() { return s_cfg1; }
 // INTERFACE MODE: exactly 324 frames of 24 bits with SDAT driven. The two register writes
 // go first; the datasheet forbids writing in the last pixel period and asks for the bus to
 // stay driven for the whole window to keep EMI off the floating line.
+// Receive one pixel period with SDAT released, polling rather than using DMA.
+static bool receive_one_pp(uint16_t& out) {
+    LPSPI.DER = 0;                         // keep this word out of the row DMA
+    LPSPI.CR = reg::CR_MEN | reg::CR_RRF;  // nothing stale in the RX FIFO
+    LPSPI.TCR = tcr_base() | reg::framesz(PP_BITS) | reg::TCR_TXMSK;
+    bool ok = wait_frame();
+    uint32_t guard = 0;
+    while (ok && (LPSPI.RSR & reg::RSR_RXEMPTY)) {
+        if (++guard > SPIN_LIMIT) ok = false;
+    }
+    out = ok ? (uint16_t)(LPSPI.RDR & 0xFFFu) : 0xFFFF;
+    LPSPI.DER = reg::DER_RDDE;
+    return ok;
+}
+
+// INTERFACE MODE, 648 PP. We drive the first 647 and hand the last to the sensor.
+//
+// DS000503 section 6.4.3: "To signalize the end of the INTERFACE MODE, the device transmits
+// a specific word in the last PP" -- 0x015 in SEIM -- and register writes are forbidden
+// there. AN000611's recipe, which the reference host follows, drives all 648 instead. The
+// reference capture cannot settle which is right: if the sensor did transmit, the host's
+// GPIO would simply out-drive its current-limited output and the analyser would still read
+// 0x000. Releasing costs nothing if the sensor is silent and avoids a fight every frame if
+// it is not. Receiving that PP rather than discarding it turns the question into a
+// measurement, reported by PROBE and STATS.
 static void interface_window(uint16_t cfg0, uint16_t cfg1) {
     sdat_drive();
     send24(reg_write_packet(0, cfg0));
     send24(reg_write_packet(1, cfg1));
-    drive_zeros(INTERFACE_BITS - 2 * REG_WRITE_BITS);
-    sdat_hiz();
+    drive_zeros(INTERFACE_BITS - 2 * REG_WRITE_BITS - PP_BITS);
+    sdat_hiz();  // released a whole PP before SYNC: no overlap at the phase boundary
+    receive_one_pp(s_last_interface_pp);
 }
+
+uint16_t last_interface_pp() { return s_last_interface_pp; }
 
 static inline uint32_t sync_delay_pp() {
     return SYNC_PP + rows_delay_pp(Config1::unpack(s_cfg1).rows_delay);

@@ -91,11 +91,21 @@ Rules that bite:
 
 - Never send data on the **first** clock after power-up — at least one activation clock must
   come first.
-- Never write in the **last** PP of INTERFACE MODE.
-- Keep driving the bus for the whole 648 PP window even when there is nothing to write, to
-  keep EMI off a floating line (DS000503 §6.3.2.1 note 1).
+- Never write in the **last** PP of INTERFACE MODE — and do not drive it at all. §6.4.3
+  says the sensor transmits an end-of-interface word there: `0x015` in SEIM
+  (`000000010101`, whose trailing `0101` runs straight into the `0x555` of SYNC).
+- Drive the bus for the rest of the window even when there is nothing to write, to keep EMI
+  off a floating line (DS000503 §6.3.2.1 note 1).
 - The shift register only commits after a correct `1001` code and 24 clocks, so a
   mid-stream false match is harmless.
+
+!!! warning "AN000611 and the datasheet disagree about that last PP"
+    The app note's recipe — and so the reference host — drives all 648 PP. The datasheet
+    says the sensor drives the 648th. The reference capture reads `0x000` there, but that
+    cannot decide it: a Raspberry Pi GPIO driving low would simply win against the sensor's
+    current-limited output, so the analyser would see `0x000` whether or not the sensor was
+    trying to send `0x015`. We release that PP and record what arrives, so first light on
+    real hardware answers the question (`PROBE`, `STATS`).
 
 ### CONFIG_0 (address 0)
 

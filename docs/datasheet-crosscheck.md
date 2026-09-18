@@ -230,7 +230,43 @@ formula predicts. The filler now goes out as two maximum-size frames.
   still leave a partial packet on the wire. The host recovers by resynchronising on the
   magic word and verifying the CRC, which `tests/test_transport.py` covers directly.
 
-## 9. Still unverifiable without hardware
+## 9. Board population, and who owns SDAT in the last PP
+
+Prompted by learning that **R13 and R33 are not fitted** (the schematic's NoBom was
+accurate; an earlier "everything is mounted" was not).
+
+**Floating nets.** Those are the 10k header pull-downs on SDAT and SCLK, and
+`SPI1.begin()` configures the pads with no pull, so both nets floated whenever undriven —
+SCLK notably while LPSPI is being reconfigured, when a spurious edge could slip word
+alignment silently. Fixed by enabling the pads' internal 100k pull-downs; details and the
+option of fitting the real parts are in [hardware](hardware.md#r13-and-r33-are-not-fitted).
+
+**The last interface PP.** Working out when SDAT is undriven meant re-reading §6.4.3, which
+says the *device* transmits an end-of-interface word (`0x015` in SEIM) in the last PP of
+INTERFACE MODE. The firmware drove all 648 PP, following AN000611 — so if the datasheet is
+right, it was in contention with the sensor for one PP every frame.
+
+The reference capture does not decide it. On the true PP grid (derived from row starts,
+since the run detector absorbs `0x015`'s trailing `0101` into the training run) the last
+interface PP reads `0x000` in every frame — but the Pi was driving low through it too, and a
+low-impedance GPIO beats a current-limited 9.6 mA output, so the analyser would read `0x000`
+either way. It is consistent with both "the sensor is silent" and "the working reference
+host fought it every frame".
+
+Given that, the firmware now drives 647 PP and **releases SDAT for the last one**, receiving
+it instead of discarding it. Releasing is free if the sensor is silent and removes the
+contention if not; receiving means M2 answers the question outright:
+
+| `PROBE` / `STATS` reports | Meaning |
+|---|---|
+| `end_of_interface=0x015` | the datasheet is right; releasing avoided a fight every frame |
+| `end_of_interface=0x000` | the sensor is silent there; AN000611's recipe was harmless |
+| anything else | the phase accounting is off by some number of bits — investigate before trusting images |
+
+That third row is the useful by-product: the word lands in a fixed place in every frame, so
+it doubles as a per-frame alignment check once its expected value is known.
+
+## 10. Still unverifiable without hardware
 
 - The three LPSPI risks in the [firmware page](firmware.md#known-risks): receive-only
   framing via `TXMSK`, SDAT release timing, and the clock accounting in `start()`.
