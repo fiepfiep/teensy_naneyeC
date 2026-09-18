@@ -26,13 +26,13 @@ histogram.*
 | | |
 |---|---|
 | Streaming images | **working** since 2026-09-18 |
-| 49.5 MHz link (default) | **35.3 fps**; 60 s without a failed row or a concealed pixel ([how](hardware.md#clock-rates)) |
+| 49.5 MHz link (default) | **35.5 fps**; 10 minutes without a lost frame, a failed row or a concealed pixel ([how](hardware.md#clock-rates)) |
 | 24.75 / 12.375 MHz | 17.9 / 8.4 fps, 0 failed rows |
 | Error handling | sampling point measured at every start; broken pixel words detected and concealed |
 | Exposure control | verified: brightness follows exposure linearly from 1.3 to 102 ms |
 | Watchdog | hardware watchdog resets a hung Teensy within 2 s |
 | Illumination (the board's LEDs) | implemented, not yet tested on hardware |
-| Host software | PyQt6 camera GUI, recorder, Python API; 79 automated tests, no hardware needed |
+| Host software | PyQt6 camera GUI, recorder, Python API; 84 automated tests, no hardware needed |
 
 ## Where to go
 
@@ -90,7 +90,7 @@ doc/                    NOT tracked: datasheets, schematic, reference capture
 firmware/               PlatformIO project for the Teensy 4.1
 host/naneye/            Python package: decoder, transport, viewer, recorder, Saleae client
 tools/                  reference-capture decoder, logic-analyser bring-up tools
-tests/                  79 tests, none needing hardware
+tests/                  84 tests, none needing hardware
 ```
 
 ## Building these docs

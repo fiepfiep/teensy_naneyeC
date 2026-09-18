@@ -78,3 +78,67 @@ def test_window_receives_and_displays_replayed_frames():
     assert win.table.item(0, 0).text() == "0.rows_in_reset"
     assert not win.btn_start.isEnabled()             # no device: acquisition disabled
     win.close()
+
+
+class _DeadReader:
+    def next_packet(self):
+        raise OSError("device disconnected")
+
+
+class _QuietReader:
+    def next_packet(self):
+        time.sleep(0.01)
+        return None
+
+
+class _FakeSerial:
+    port = "COM99"
+
+
+class _FakeDevice:
+    def __init__(self, reader):
+        self.reader = reader
+        self.serial = _FakeSerial()
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class _LiveSource:
+    name = "fake device"
+
+    def __init__(self):
+        self.device = _FakeDevice(_DeadReader())
+
+
+def test_reader_reconnects_when_the_port_fails(monkeypatch):
+    import naneye.transport as transport
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    opened = []
+
+    class _NewDevice(_FakeDevice):
+        def __init__(self, port):
+            super().__init__(_QuietReader())
+            opened.append(port)
+
+    monkeypatch.setattr(transport, "Device", _NewDevice)
+    src = _LiveSource()
+    old = src.device
+    r = gui.FrameReader(src)
+    r.RETRY_S = 0.05
+    signalled = []
+    r.reconnected.connect(lambda: signalled.append(True))
+    r.start()
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and not signalled:
+        app.processEvents()
+        time.sleep(0.01)
+    r.stop()
+    r.wait(2000)
+    assert old.closed
+    assert opened == ["COM99"]                       # reopened by its old name first
+    assert src.device is not old and r.connected and r.reconnects == 1
+    assert signalled
+    assert any("reconnected" in line for line in r.log)

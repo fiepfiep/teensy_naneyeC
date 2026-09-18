@@ -255,7 +255,7 @@ defined in the [design record](design.md) (spec.md §9).
 | M1 | clock and register writes reach the sensor | done |
 | M2 | the sensor answers with training patterns | done |
 | M3 | a complete, valid frame | done, 0 failed rows |
-| M4 | continuous streaming without loss | done at 24.75 MHz for 200 frames; the 60 s soak is still to run |
+| M4 | continuous streaming without loss | done: 10 minutes at 49.5 MHz, nothing lost (the Saleae no-gap-within-a-row check is still to do) |
 | M5 | exposure control | exposure done; LED illumination not yet tested |
 | M6 | measurement readiness: dark frames, noise | not started |
 
@@ -265,7 +265,7 @@ and were not, is in [First light](#first-light-what-it-took-2026-09-18) below.
 ### M0 — before the camera is connected
 
 ```bash
-uv run pytest                                     # 79 tests
+uv run pytest                                     # 84 tests
 uv run --group firmware python -m platformio run -d firmware -t upload
 ```
 
@@ -368,7 +368,7 @@ work, with the sampling point chosen automatically at every `START`:
 |---|---|
 | 12.375 MHz | 0 failed rows, 8.4 fps |
 | 24.75 MHz | 0 failed rows, 0 dropped over 200 frames, 17.9 fps |
-| **49.5 MHz** | **0 failed rows and 0 concealed pixels over 2100 frames (60 s, 220 million pixel words), 35.3 fps** — the default |
+| **49.5 MHz** | **10 minutes, 21,313 frames at 35.5 fps: no frame lost or dropped, 0 failed rows, 0 concealed pixels (2.2 billion pixel words)** — the default |
 
 **Where the receiver samples each bit is what makes 49.5 MHz work.** The sensor changes
 SDAT ~10 ns after the SCLK edge reaches it, and both the edge and the data cross the wiring

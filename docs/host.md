@@ -84,6 +84,14 @@ received, 35.5 displayed, nothing lost or dropped over 45 s.
 
 Commands are only ever written from the window (`Device.command()`); their replies arrive
 in the packet stream and are picked up by the reader thread. Nothing competes for the port.
+
+**Recovery.** If the serial port fails, because the Teensy was unplugged or its watchdog
+reset it, the link shows **RECONNECTING**. The reader closes the port and tries every second
+to open it again, first under its old name, then any Teensy. Once it is back, the camera is
+restarted and the slider settings are written back, since a reset device comes back with its
+default registers. If the port is fine but frames stop, the link shows **NO FRAMES** after
+2 s, and after 5 s the camera is restarted, unless *Stop* was pressed. Everything is logged
+in the *Device* panel.
 The device is started only once the window and its reader are running: started earlier, it
 streamed while the window was being built and dropped frames nobody was reading (124 of
 them, in the measurement that found this).
@@ -185,8 +193,9 @@ close it before running a script or the recorder.
 ## Recorder
 
 ```bash
-uv run python -m naneye.record --source auto --depth 10 --frames 1200 --out capture/run1
-uv run python -m naneye.record --source auto --frames 100 --exposure 64 --led 8 --out capture/run2
+uv run python -m naneye.record --source auto --frames 1200 --out capture/run1
+uv run python -m naneye.record --source auto --seconds 60 --exposure 64 --out capture/run2
+uv run python -m naneye.record --source auto --seconds 600 --no-frames --out capture/soak
 ```
 
 Per run:
@@ -195,8 +204,23 @@ Per run:
 |---|---|
 | `frames.npy` | `(N, 320, 320)`, `uint16` for 10-bit, `uint8` for 8-bit |
 | `meta.csv` | one row per frame: counter, timestamp, exposure, config, drop counters, failed rows, concealed pixels, min/max/mean |
-| `run.json` | settings and a summary: measured fps, counter gaps, failed rows, concealed pixels, and packets the host rejected (`host_bad_crc`, `host_resyncs`) |
-| `stream.bin` | with `--raw`, the verbatim packet stream |
+| `run.json` | settings and a summary: measured fps, frames *dropped by device* and *lost on PC* (kept apart, as in the GUI), failed rows, concealed pixels, and packets the host rejected (`host_bad_crc`, `host_resyncs`) |
+| `stream.bin` | with `--raw`, every packet header |
+
+**Frames go to disk as they arrive**, so memory stays flat however long the run. They are
+written to `frames.bin` and `meta.csv` is flushed as it goes, so if the recorder dies,
+everything received so far is still there:
+`np.fromfile("frames.bin", np.uint16).reshape(-1, 320, 320)`. At the end `frames.bin` is
+copied into `frames.npy` in chunks and removed (`--keep-bin` keeps it). Mind the disk: at
+49.5 MHz, 10-bit data is about 7 MB/s, so a 10-minute run is about 4.3 GB, and briefly
+twice that while `frames.npy` is assembled.
+
+`--no-frames` writes only `meta.csv` and `run.json`: every frame's header and statistics,
+no pixels. That is what a soak test of the link needs.
+
+For a live device the recorder starts the camera itself, once it is already reading, and
+ignores anything from an earlier stream until `START` has answered, so no frames pile up
+unread at the start. `--seconds` times the run instead of counting frames.
 
 A recording is **self-describing**: every frame carried its own exposure, gain, clock rate
 and drop counters in its header, so nothing has to be remembered separately. For measurement
@@ -207,7 +231,8 @@ and still know what it is.
 import json, numpy as np
 frames = np.load("capture/run1/frames.npy")
 meta = json.load(open("capture/run1/run.json"))
-assert meta["counter_gaps"] == 0 and meta["rows_failed_total"] == 0
+assert meta["lost_on_pc"] == 0 and meta["dropped_by_device"] == 0
+assert meta["rows_failed_total"] == 0
 dark = frames.mean(axis=0)
 print("temporal noise", frames.astype(float).std(axis=0).mean(), "DN")
 ```
@@ -295,7 +320,7 @@ Diagnostic commands (`LISTEN`, `PROBE`, `START REF`, `START AN`, `ALIGN`, `CLKME
 ## Tests
 
 ```bash
-uv run pytest          # 79 tests, none needing hardware
+uv run pytest          # 84 tests, none needing hardware
 ```
 
 | File | Covers |
@@ -307,7 +332,8 @@ uv run pytest          # 79 tests, none needing hardware
 | `test_sources.py` | replay path resolution, the synthetic fallback, lossless replay round-trip |
 | `test_device.py` | the `Device` command/reply logic against a simulated serial port |
 | `test_regs.py` | the register model: field layout, round trips, exposure maths against the firmware and the device |
-| `test_gui.py` | the Qt GUI, headless: loss accounting (device drops vs PC losses), frame hand-over, and a smoke test on replayed frames |
+| `test_gui.py` | the Qt GUI, headless: loss accounting (device drops vs PC losses), frame hand-over, reconnecting after the port fails, and a smoke test on replayed frames |
+| `test_record.py` | the streaming recorder end to end: `frames.npy` against `meta.csv`, the raw stream, `--no-frames`, 8-bit |
 | `test_link_quality.py` | the link-quality analysis: alignment search, framing-error counting, and the limit that data-bit errors are invisible |
 
 Tests needing the 434 MB capture skip cleanly when it is absent. `test_unpack.py` parses the

@@ -26,11 +26,14 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtCore import Qt
 
 from . import protocol, regs
+from .accounting import FrameAccounting
 from .sources import _decode, open_source
 
 CLOCKS = ((49500000, "49.5 MHz  (~35 fps)"), (24750000, "24.75 MHz  (~18 fps)"),
           (12375000, "12.375 MHz  (~8 fps)"))
 SETTLE_S = 0.15          # a slider must be still this long before its value is sent
+NO_FRAMES_S = 2.0        # this long without a frame: show NO FRAMES
+RESTART_AFTER_S = 5.0    # ... and this long: restart the camera (unless Stop was pressed)
 ACCENT = "#4fa3ff"
 GOOD, BAD, WARN = "#3ecf8e", "#ff5c5c", "#ffb44f"
 
@@ -39,27 +42,30 @@ GOOD, BAD, WARN = "#3ecf8e", "#ff5c5c", "#ffb44f"
 class FrameReader(QtCore.QThread):
     """Owns the source: reads every packet, keeps the latest frame, counts what arrives.
 
+    If the serial port fails -- the Teensy was unplugged, or reset by its watchdog and
+    re-enumerated -- the reader closes it, tries to open it again every second, and emits
+    `reconnected` when it succeeds, so the window can restart the camera.
+
     For a live device the serial port is read here and only here. Commands are written
     from the GUI thread with Device.command(), which only writes; their replies arrive in
     the packet stream like everything else and are collected into `log`.
     """
 
+    reconnected = QtCore.pyqtSignal()
+    RETRY_S = 1.0
+
     def __init__(self, source):
         super().__init__()
         self.source = source
+        self.connected = True
+        self.reconnects = 0
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._latest = None          # (header, img)
         self._new = False
         self.arrivals = collections.deque(maxlen=400)
         self.received = 0
-        # A jump in the frame counter is either a frame the device dropped itself (it counts
-        # those in every header's frames_dropped) or one that left the device and never
-        # arrived intact. Kept apart, because they have different causes and remedies.
-        self.dropped_on_device = 0
-        self.lost_on_pc = 0
-        self._last_counter = None
-        self._last_dropped = None
+        self.acct = FrameAccounting()  # device drops and PC losses, kept apart
         self.log = collections.deque(maxlen=200)
         self.error = None
 
@@ -78,19 +84,20 @@ class FrameReader(QtCore.QThread):
         with self._lock:
             return self._latest
 
+    @property
+    def dropped_on_device(self) -> int:
+        return self.acct.dropped_on_device
+
+    @property
+    def lost_on_pc(self) -> int:
+        return self.acct.lost_on_pc
+
     def reset_counts(self):
         """Forget the counter history, e.g. after a restart."""
-        self.dropped_on_device = self.lost_on_pc = 0
-        self._last_counter = self._last_dropped = None
+        self.acct.reset()
 
     def _frame(self, header, img):
-        if self._last_counter is not None:
-            gap = max(0, header.frame_counter - self._last_counter - 1)
-            by_device = max(0, header.frames_dropped - self._last_dropped)
-            self.dropped_on_device += by_device
-            self.lost_on_pc += max(0, gap - by_device)
-        self._last_counter = header.frame_counter
-        self._last_dropped = header.frames_dropped
+        self.acct.add(header)
         self.received += 1
         self.arrivals.append(time.monotonic())
         with self._lock:
@@ -99,12 +106,15 @@ class FrameReader(QtCore.QThread):
 
     def run(self):
         try:
-            device = getattr(self.source, "device", None)
-            if device is not None:
+            if getattr(self.source, "device", None) is not None:
                 # Read packets directly: next_packet() returns on every quiet read, so the
                 # stop flag is checked even when the device is not streaming.
                 while not self._stop.is_set():
-                    p = device.reader.next_packet()
+                    try:
+                        p = self.source.device.reader.next_packet()
+                    except Exception as ex:  # noqa: BLE001 - port gone: unplug or reset
+                        self._reconnect(ex)
+                        continue
                     if p is None:
                         continue
                     if p.is_image:
@@ -119,6 +129,32 @@ class FrameReader(QtCore.QThread):
         except Exception as ex:  # noqa: BLE001 - reported in the window, not swallowed
             if not self._stop.is_set():
                 self.error = f"{type(ex).__name__}: {ex}"
+
+    def _reconnect(self, why: Exception):
+        from .transport import Device
+
+        self.connected = False
+        self.log.append(f"! connection lost ({type(why).__name__}); reconnecting")
+        port = self.source.device.serial.port
+        try:
+            self.source.device.close()
+        except Exception:  # noqa: BLE001
+            pass
+        while not self._stop.is_set():
+            time.sleep(self.RETRY_S)
+            try:
+                dev = Device(port)
+            except Exception:  # noqa: BLE001 - not back yet
+                try:
+                    dev = Device.open_first()  # it may have come back under another name
+                except Exception:  # noqa: BLE001
+                    continue
+            self.source.device = dev
+            self.connected = True
+            self.reconnects += 1
+            self.log.append(f"! reconnected on {dev.serial.port}")
+            self.reconnected.emit()
+            return
 
 
 def rate(stamps, window=2.0) -> float:
@@ -272,7 +308,6 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.source = source
         self.depth = depth
-        self.device = getattr(source, "device", None)
         self.reader = FrameReader(source)
         self.painted = collections.deque(maxlen=400)
         self.paused = False
@@ -285,8 +320,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pending_cfg = None
         self.pending_since = 0.0
         self.saved = 0
+        self.user_stopped = False    # Stop pressed: no automatic restarts
+        self.restore_cfg = None      # settings to put back after a restart
+        self.last_restart = time.monotonic()
         self.setWindowTitle(f"NanEyeC — {source.name}")
         self._build(clock_hz)
+        self.reader.reconnected.connect(self._on_reconnected)
         self.reader.start()
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._tick)
@@ -298,6 +337,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # it streams while the window is being built and drops frames nobody is reading.
         if self.device is not None:
             QtCore.QTimer.singleShot(0, self._start)
+
+    @property
+    def device(self):
+        """The live device, if any: after a reconnect this is a new Device object."""
+        return getattr(self.source, "device", None)
 
     # --- layout ------------------------------------------------------------------------
     def _build(self, clock_hz):
@@ -379,7 +423,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_start = QtWidgets.QPushButton("Start")
         self.btn_stop = QtWidgets.QPushButton("Stop")
         self.btn_start.clicked.connect(self._start)
-        self.btn_stop.clicked.connect(lambda: self._send("STOP"))
+        self.btn_stop.clicked.connect(self._stop_device)
         self.chk_auto = QtWidgets.QCheckBox("Auto contrast")
         self.chk_auto.setChecked(True)
         self.chk_auto.toggled.connect(lambda on: setattr(self, "auto_contrast", on))
@@ -487,7 +531,22 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as ex:  # noqa: BLE001
             self.log.appendPlainText(f"! {ex}")
 
-    def _start(self):
+    def _stop_device(self):
+        self.user_stopped = True
+        self._send("STOP")
+
+    def _on_reconnected(self):
+        self.log.appendPlainText("! restarting the camera after reconnecting")
+        self._start(automatic=True)
+
+    def _start(self, automatic: bool = False):
+        if not automatic:
+            self.user_stopped = False
+        # A restart (or a device that reset) comes back with its default registers: put the
+        # sliders' settings back once the first frame shows what the device has.
+        if self.controls_ready and self.sent_cfg is not None:
+            self.restore_cfg = self.sent_cfg
+        self.last_restart = time.monotonic()
         self._send("STOP")
         self._send(f"CLK {self.clock.currentData()}")
         self._send(f"DEPTH {self.depth}")
@@ -503,6 +562,13 @@ class MainWindow(QtWidgets.QMainWindow):
             s.setEnabled(self.device is not None)
         self.device_cfg = self.sent_cfg = self.pending_cfg = (header.cfg0, header.cfg1)
         self.controls_ready = True
+        if self.restore_cfg is not None:
+            wanted = regs.unpack(*self.restore_cfg)
+            for s in self.sliders:
+                s.set_field_value(wanted[s.field])
+            self.restore_cfg = None
+            self.pending_cfg = self._wanted_cfg()
+            self.pending_since = 0.0  # send at once
 
     def _wanted_cfg(self):
         values = {s.field: s.field_value() for s in self.sliders}
@@ -586,16 +652,38 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hist.set_data(img, (lo, hi))
         self.painted.append(time.monotonic())
 
+    def _watch_link(self):
+        """'RECONNECTING' or 'NO FRAMES' when the stream has stopped, else None. Restarts
+        the camera after RESTART_AFTER_S without frames, unless Stop was pressed."""
+        if self.device is None and self.reader.connected:
+            return None                      # replay or file: nothing to watch
+        if not self.reader.connected:
+            return "RECONNECTING"
+        now = time.monotonic()
+        last = self.reader.arrivals[-1] if self.reader.arrivals else 0.0
+        quiet = now - max(last, self.last_restart)
+        if self.user_stopped or quiet < NO_FRAMES_S:
+            return None
+        if quiet >= RESTART_AFTER_S:
+            self.log.appendPlainText("! no frames: restarting the camera")
+            self._start(automatic=True)
+        return "NO FRAMES"
+
     def _update_stats(self):
         rx = rate(self.reader.arrivals)
         disp = rate(self.painted)
+        trouble = self._watch_link()
+        if trouble:
+            self.st_sync.set(trouble, BAD)
         self.st_rx.set(f"{rx:.1f}")
         self.st_disp.set(f"{disp:.1f}", WARN if rx and disp < 0.9 * rx else None)
         h = self.header
         if h is None:
             return
         sync_ok = not h.sync_lost
-        self.st_sync.set("locked" if sync_ok else "SYNC LOST", GOOD if sync_ok else BAD)
+        if not trouble:
+            self.st_sync.set("locked" if sync_ok else "SYNC LOST",
+                             GOOD if sync_ok else BAD)
         self.st_failed.set(str(h.rows_failed), BAD if h.rows_failed else None)
         self.st_conc.set(str(h.pixels_concealed), WARN if h.pixels_concealed else None)
         lost = self.reader.lost_on_pc
