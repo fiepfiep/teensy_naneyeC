@@ -189,12 +189,41 @@ for the whole readout. So expect up to one frame period of latency — ~52 ms at
 ~104 ms at 12.375 MHz. That is deliberate: handling `START`, `STOP` or `PROBE` halfway
 through a readout would re-enter the driver underneath itself.
 
-The two that matter during bring-up:
+## Diagnostics
 
-- **`SELFTEST`** — unpack and exposure maths against the embedded golden row. Isolates
-  decode bugs from link bugs.
-- **`PROBE [rows]`** — phase-correct frame cycle reporting word statistics instead of an
-  image, then clocks out the remainder so alignment is preserved.
+Kept in the shipping firmware on purpose: these are what found the faults that hid first
+light (see [Hardware: first light](hardware.md#first-light-what-it-took-2026-09-18)). None of
+them is needed for normal streaming. All except `ID` and `SELFTEST` need streaming stopped.
+
+| Command | What it does | Use it when |
+|---|---|---|
+| `ID` | Firmware version, actual SCLK (derived from the clock registers, not assumed), registers, format, and **last reset cause** (`normal` / `WATCHDOG`) | Always first. A `WATCHDOG` right after flashing is normal; see below |
+| `SELFTEST` | Unpack and exposure maths against the embedded golden row | Separating decode bugs from link bugs |
+| `PROBE [rows]` | A phase-correct frame cycle reporting word statistics instead of an image | Checking an already-running link without disturbing its phase |
+| `LISTEN [rows]` | Clocks up to 2000 rows with SDAT released and classifies each one: `.` zeros, `A` 0xAAA, `S` 0x555, `P` pixels, `?` mixed. Prints a run-length map, e.g. `Ax3 Px320 ? . Sx4 Px320` | Finding out what the sensor is doing, with no assumptions about phase. Never drives SDAT, so it is always safe |
+| `START REF [VERBATIM] [FAST] [EARLY] [FIRST] [rows]` | The reference host's start sequence, then (with `rows`) a gapless `LISTEN`. `VERBATIM` uses the reference's exact register values, `FAST` sends the first write pair at SCLK rate instead of bit-banged, `EARLY` releases SDAT straight after the idle-off write, `FIRST` stops after the idle-on pair | Bisecting a start-up that does not start |
+| `START AN` | AN000611's single-write sequence. Known not to work reliably on this board (and 2 clocks off when it does); kept for comparison | Re-testing that finding |
+| `ALIGN n` | Alignment clocks used by `START AN` (datasheet: 10) | Only with `START AN` |
+| `CLKMEAS` | Measures SCLK on the pin, sensor off | After touching the clock tree |
+| `WDTEST` | Hangs on purpose; the watchdog must reset the board within 2 s | Proving the watchdog still works |
+
+Host-side companions, all driving the Saleae through its MCP server:
+
+- `tools/show_bringup.py`: triggers on NanEye_EN, runs a start command, and plots an
+  overview plus zooms of the idle-off write, the sensor's first output, and its launch delay.
+- `tools/check_alignment.py`: where each row transfer lands relative to the sensor's own row
+  starts. Every burst at the same offset, and that offset −96, means phase-locked.
+- `tools/capture_link.py` / `tools/analyze_link.py`: general capture and link checks
+  (clock rate, exact phase counts, register writes).
+
+## Watchdog
+
+RTWDOG (WDOG3), 2 s timeout on the 32 kHz LPO clock (`watchdog.cpp`). Fed from `loop()`,
+per row in `LISTEN`, and while `power(true)` waits out the sensor's power-off time. The
+longest legitimate blocking operation is about 0.7 s. After a reset the USB port
+re-enumerates in about 0.3 s and `ID` reports it. Flashing usually leaves `last reset:
+WATCHDOG` too: the old image parks in the bootloader hand-off with the watchdog running.
+That is harmless.
 
 ## Known risks
 

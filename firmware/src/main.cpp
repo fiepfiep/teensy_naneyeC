@@ -31,7 +31,7 @@ static constexpr const char* FW_VERSION = "0.1.0";
 static constexpr size_t FB_SIZE = 128000;
 static DMAMEM uint8_t s_fb[2 * FB_SIZE];
 
-static uint8_t s_format = proto::FMT_GRAY8;
+static uint8_t s_format = proto::FMT_GRAY10;  // full sensor resolution by default
 static bool s_run = false;
 static uint32_t s_frame_counter = 0;
 static uint32_t s_frames_dropped = 0;
@@ -262,10 +262,20 @@ static void handle_command(char* line) {
                   s_force_start ? "  FORCED: frames are not from a verified sensor" : "");
         } else {
             s_run = false;
-            reply("START failed: pre-sync training pattern %lu/%u words. No sensor answering: "
-                  "check power, wiring and that SDAT reaches the sensor. "
-                  "START FORCE streams anyway, to test the USB path.",
-                  (unsigned long)seim::presync_training(), (unsigned)ROW_PP);
+            const uint32_t training = seim::presync_training();
+            if (training < ROW_PP / 2) {
+                reply("START failed: pre-sync training pattern %lu/%u words. No sensor "
+                      "answering: check power, wiring and that SDAT reaches the sensor. "
+                      "START FORCE streams anyway, to test the USB path.",
+                      (unsigned long)training, (unsigned)ROW_PP);
+            } else {
+                // The sensor answered, but no clean row start was found in the first frame:
+                // the training pattern survives the link while pixel data does not.
+                reply("START failed: sensor answers (pre-sync training %lu/%u) but could not "
+                      "lock onto its rows: pixel data is not arriving intact. Signal "
+                      "integrity at this clock? Try a lower CLK, or SAMPLE 1.",
+                      (unsigned long)training, (unsigned)ROW_PP);
+            }
         }
     } else if (!strcmp(tok[0], "STOP")) {
         s_run = false;

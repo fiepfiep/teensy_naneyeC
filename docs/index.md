@@ -65,7 +65,9 @@ uv run python -m naneye.viewer --source replay
 
 ![The viewer running on replayed reference frames](images/viewer-replay.png)
 
-With hardware, swap `--source replay` for `--source auto`.
+With hardware, swap `--source replay` for `--source auto`:
+
+![The viewer streaming live from the NanEyeC through the Teensy](images/viewer-live.png)
 
 ## Map
 

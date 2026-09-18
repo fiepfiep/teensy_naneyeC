@@ -316,6 +316,22 @@ sensor sends without any assumptions about phase.
 Result at 12.375 MHz: 5/5 starts, 0 failed rows, 0 dropped frames, 8.4 fps; `EXP` changes
 brightness linearly (733 → 350 DN from 102 ms to 1.3 ms), so interface-window writes land.
 
+Clock rates on the bench wiring (jumper wires, Saleae probes on SDAT at both ends):
+
+| SCLK | Result |
+|---|---|
+| 12.375 MHz | 5/5 starts, 0 failed rows, 8.4 fps |
+| 24.75 MHz | 5/5 starts, 0 failed rows, 0 dropped over 200 frames, **17.9 fps** |
+| 49.5 MHz | Fails. Sampling at the normal edge sees nothing usable; `SAMPLE 1` receives the training pattern cleanly (327/328) but pixel rows arrive garbled, so the row lock fails |
+
+At 49.5 MHz the sensor's SDAT never reaches full-width bits on the analyser, only narrow
+slivers. Its output is current-limited (9.6 mA at `output_curr` = 3). Driving an estimated
+30 pF (jumper wires, two Teensy pads, one or two probe tips) at 0.32 V/ns takes ~10 ns per
+full swing, which is the whole half-period. The alternating training pattern survives it;
+pixel data with runs of equal bits does not. That is a wiring limit, not a firmware one.
+Shorter leads, a ground next to SDAT, and taking the probes off SDAT are the first things
+to try.
+
 ### M3 — first frame
 
 ```

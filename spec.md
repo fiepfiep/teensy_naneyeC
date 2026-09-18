@@ -579,7 +579,7 @@ tests/          golden decode regression, protocol round-trip
 
 | # | Risk | Mitigation |
 |---|------|-----------|
-| R1 | Jumper-wire signal integrity ≥ 25 MHz (24 R series + ~30 pF of pads, caps and connector stubs) | Start at 12.375 MHz (D6); step up only after Saleae confirms setup margin; keep leads short with adjacent grounds |
+| R1 | Jumper-wire signal integrity ≥ 25 MHz (24 R series + ~30 pF of pads, caps and connector stubs) | **Measured 2026-09-18:** 24.75 MHz clean (17.9 fps, 0 failed rows over 200 frames). 49.5 MHz fails on the bench wiring: training words survive (with `SAMPLE 1`) but pixel data does not — the sensor's current-limited SDAT drive (9.6 mA) cannot slew the net's capacitance in a 10 ns half-period. Needs shorter wires / fewer loads on SDAT |
 | R2 | ~8 ns measured round-trip delay caps SCLK | Stay ≤ 49.5 MHz; treat 62.6 MHz as out of scope |
 | R3 | LPSPI may insert idle SCK cycles between 12-bit frames → §3.3 pixel corruption | `TCR[CONT]`; fallback to one-row `FRAMESZ` (option B, §6.2); verified by Saleae in M4 |
 | R4 | Sensor has no chip select and cannot share the bus | LPSPI3 dedicated to the camera; LED DAC bit-banged on GPIO |

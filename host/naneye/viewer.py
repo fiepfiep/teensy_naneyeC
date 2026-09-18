@@ -89,7 +89,7 @@ def main(argv=None):
     ap.add_argument("--source", default="replay",
                     help="'replay', 'auto', a COM port, a .csv capture, or a "
                          "recorded stream file")
-    ap.add_argument("--depth", type=int, default=8, choices=(8, 10, 12))
+    ap.add_argument("--depth", type=int, default=10, choices=(8, 10, 12))
     ap.add_argument("--clock", type=int, default=12375000)
     ap.add_argument("--scale", type=int, default=2)
     ap.add_argument("--fps", type=float, default=19.3, help="replay rate")
