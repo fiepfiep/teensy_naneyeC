@@ -175,6 +175,13 @@ designed power-on reset control and the recovery mechanism of last resort).
 
 Sensor power is negligible (9.7 mW in SEIM). LED draw is bounded by the DAC ceiling (§4.4).
 
+**The rail discharges slowly.** Measured after EN goes low: still 0.5 V after 143 ms,
+below 0.1 V only after ~630 ms — nothing on the NanoBerry actively discharges it. A power
+cycle shorter than that may not give the sensor a clean power-on reset, and the start-up
+sequence (§6.4) depends on one: starts after a 0.4 s off-time failed. `seim::power(true)`
+therefore enforces **at least 1 s off** since the last power-down, however soon it is
+called, and every `START` power-cycles the sensor first.
+
 ### 4.3 Half-duplex direction control
 
 SDAT is driven by the Teensy during INTERFACE MODE and by the sensor at all other times.
@@ -377,6 +384,12 @@ continuation, switch to option B. This is settled in M4.
 Row-chunked ring buffer, **not** whole-frame buffering:
 
 - RX ring: 16 rows × 328 PP × 2 B = 10.5 KB in `DMAMEM` (OCRAM).
+- **`DMAMEM` is cached.** OCRAM sits behind the Cortex-M7's write-back D-cache, and the
+  eDMA writes RAM behind the cache's back. Every row buffer is invalidated
+  (`arm_dcache_delete`) before its transfer is armed and again when it completes, and each
+  buffer is padded to whole 32-byte cache lines. Without this the sensor streamed perfect
+  frames on the wire — seen on the logic analyser — while the firmware read zeros or stale
+  words: the bug that hid first light for most of a day (2026-09-18).
 - Decoded frame buffer: 320 × 320 × 1 B (8-bit) or packed 10-bit (128 KB), double-buffered.
 - Total well under the 512 KB OCRAM + 512 KB RAM1 budget. **PSRAM is not required.**
 
@@ -386,19 +399,32 @@ cycles — roughly two orders of magnitude of headroom.
 ### 6.4 Capture state machine
 
 ```
-POWER_OFF     → drive Naneye_EN low, SDAT hi-Z
-POWER_ON      → EN high, wait for LDO + sensor POR
-INIT_CONFIG   → 1 activation clock; CONFIG_0=0x009F; CONFIG_1=0x009F (idle=1, SEIM)
+POWER_CYCLE   → EN low (if on), ≥ 1 s off (§4.2), EN high, 5 ms
+INIT_CONFIG   → 1 activation clock; CONFIG_0; CONFIG_1 (idle=1, SEIM), bit-banged at ~1 MHz
                 (replicates §3.2 step 1)
-START         → CONFIG_0; CONFIG_1 with idle=0 (§3.2 step 2) → sensor begins streaming
-PRESYNC       → tristate SDAT; clock and discard; hunt for 0xAAA / 0x555
-SYNC_LOCK     → establish 12-bit word alignment from the 8×training → "11" transition
-FRAME_0       → capture and DISCARD (saturated — §3.5)
-STREAM        → per frame: 648 PP interface window (drive SDAT: 2 register writes if
-                pending, then zeros for the remainder), tristate, 4×328 PP sync+delay,
-                320 rows, 8 PP EOF, repeat
-FAULT         → on sync loss: re-hunt; on repeated failure: power-cycle via Naneye_EN
+RUN_IN        → one frame's worth of clocks (1,279,366) with SDAT driven low — as the
+                reference host does
+START         → CONFIG_0; CONFIG_1 with idle=0 and rows_delay=0 at SCLK rate, zeros to the
+                end of a 648 PP window, release SDAT (§3.2 step 2)
+PRESYNC       → first row received: must be mostly training ("is there a sensor?")
+ROW_LOCK      → scan the bits for row 1's 8×0x555 → "11" break; clock the exact number of
+                bits to the next row boundary; that row must show 8 training words
+FRAME_0       → rest of the first frame + EOF clocked and DISCARDED (saturated — §3.5)
+STREAM        → per frame: 648 PP interface window (drive SDAT: 2 register writes, then
+                zeros, sensor owns the last PP), tristate, sync + delay, 320 rows, 8 PP EOF
+FAULT         → capture failure: power-cycle and START again
 ```
+
+Why this and not the datasheet's sequence. AN000611's single write (activation clock,
+CONFIG_1 idle-off, 10 alignment clocks) started only sometimes on this board, and when it
+did, its fixed phase count put every row transfer 2 clocks late, so every row failed. The
+reference host's sequence starts every time. And the phase after it is *found*, not
+counted: how many SCLK clocks the first frame's training lasts varies from start to start
+(12,074–12,084 bits measured, not whole pixel periods), because parts of the sensor run on
+its own oscillator. From the first locked row on, everything is SCLK-counted and
+deterministic — every row of every later frame lands exactly (`tools/check_alignment.py`).
+Row 0 of the first frame is trained with 0xAAA, which runs straight on into its first
+start bit, so the lock is taken on row 1.
 
 ### 6.5 Continuous clocking requirement
 
@@ -415,6 +441,15 @@ Every row is validated: 8 training words must read `0x555`, all 320 pixel words 
 start = 1 and stop = 0. Rows failing validation increment a counter in the frame header; a
 threshold triggers re-sync. Full validation is cheap and, per §3.1, is expected to pass
 100 % of the time — so any failure is real information.
+
+### 6.6b Watchdog
+
+RTWDOG (WDOG3), 2 s timeout, clocked from the 32 kHz LPO so it survives any PLL mistake.
+Fed from `loop()`, per row in `LISTEN`, and while waiting out a power cycle; the longest
+legitimate blocking operation is ~0.7 s. The reset cause is latched at boot and reported by
+`ID` (`last reset: WATCHDOG`). `WDTEST` hangs on purpose: measured, the port drops after
+1.97 s and is back at 2.25 s. A flash also usually reads as a watchdog reset, because the
+old image parks in the bootloader hand-off with the watchdog still running — harmless.
 
 ### 6.7 Tuning after bring-up
 
@@ -558,6 +593,8 @@ tests/          golden decode regression, protocol round-trip
 | R14 | If R16 and R17 are both fitted, the VIS and NIR strings share one current sink and the split between them is set by their forward voltages | Firmware unaffected; confirm the jumpers on first hardware contact and record which strings are active (§4.4) |
 | R12 | **Open:** exact `high_speed` clock matching is unavailable from the PLL dividers | Out of scope (§5.3); non-HS modes match within 1 % |
 | R13 | Teensy pins 26/1 tied together adds pad capacitance to SDAT | Acceptable at ≤ 24.75 MHz; single-pin half-duplex (§4.3) is the fix if it bites at 49.5 MHz |
+| R15 | **Resolved:** row DMA into cached OCRAM read stale data | D-cache invalidation around every row transfer (§6.3) |
+| R16 | **Resolved:** first-frame phase not deterministic in SCLK clocks; datasheet start unreliable | Reference start sequence plus a bit-level row lock (§6.4); ≥ 1 s power-off (§4.2) |
 
 ---
 

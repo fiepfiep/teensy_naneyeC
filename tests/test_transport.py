@@ -80,6 +80,22 @@ def test_truncated_stream_ends_cleanly(frames):
     assert len(packets) == 2
 
 
+def test_truncated_packet_does_not_swallow_the_next_one(frames):
+    """Seen on hardware: a reply written while an image was still going out. Whatever the
+    cause, a packet cut short on the wire claims bytes belonging to the packets after it;
+    skipping its full claimed length on the CRC failure lost the reply that followed."""
+    image = fake.frame_packet(frames[0], 0)
+    cut = image[:protocol.HEADER_SIZE + 1000]            # header promises far more than this
+    data = cut + protocol.text_packet(protocol.TYPE_RESPONSE, "STOP")
+    data += fake.frame_packet(frames[1], 1) + b"\x00" * 200_000
+    reader = fake.reader_over_bytes(data)
+    packets = list(reader)
+    texts = [p.text for p in packets if not p.is_image]
+    assert texts == ["STOP"], "the reply after a truncated image must survive"
+    assert [p.header.frame_counter for p in packets if p.is_image] == [1]
+    assert reader.bad_crc >= 1
+
+
 def test_text_packets_are_not_images():
     data = protocol.text_packet(protocol.TYPE_RESPONSE, "CLK 24750000 Hz")
     data += protocol.text_packet(protocol.TYPE_LOG, "re-syncing")

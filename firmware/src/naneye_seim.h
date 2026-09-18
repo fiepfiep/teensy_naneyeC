@@ -45,11 +45,24 @@ bool powered();
 // Select one of the supported SCLK rates (spec.md section 5.3); the matching sensor
 // mclk_mode/high_speed bits are applied to the config on the next frame.
 const naneye::ClockSetting& set_clock(uint32_t want_hz);
+
+// SCLK as the hardware is actually configured, derived from the live CBCMR register and
+// the selected divider. This is what frame headers report.
 uint32_t sclk_hz();
+// The table value the selected setting is meant to produce.
+uint32_t nominal_sclk_hz();
+// The LPSPI root clock decoded from CBCMR (should be 99 MHz).
+uint32_t lpspi_root_hz();
+// SCLK measured by timing real clock cycles against the CPU cycle counter. Returns 0 if
+// the sensor is powered (the clocks would advance it) or the peripheral stalls.
+uint32_t measure_sclk_hz();
 
 // Delay the input sampling point by one LPSPI functional-clock cycle (CFGR1[SAMPLE]).
 // Intended as a timing knob for the higher clock rates; see spec.md R2.
 void set_delayed_sample(bool on);
+// Bring-up: clocks between the idle-off write and INITIAL PRE-SYNC (datasheet: 10).
+void set_align_clocks(uint32_t n);
+uint32_t align_clocks();
 bool delayed_sample();
 
 void set_config(uint16_t cfg0, uint16_t cfg1);
@@ -59,8 +72,35 @@ uint16_t config1();
 // Run the power-on sequence up to the point where the sensor is streaming, per AN000611
 // section 3.3: activation clock, register writes, alignment clocks, then the initial
 // pre-sync / sync / delay phases and the first (discarded) frame.
-// Returns false if no valid training pattern is ever seen.
-bool start();
+//
+// The first 328 PP of INITIAL PRE-SYNC are received rather than discarded and checked for
+// the training pattern. With require_sensor (the default) start() fails if fewer than half
+// of them are training words, so a missing or unpowered sensor is reported instead of
+// streaming zeros. require_sensor=false streams regardless, for exercising the USB path
+// with no camera attached.
+//
+// an_sequence follows AN000611 section 3.3 literally: a single CONFIG_0/CONFIG_1 pair with
+// idle already off. The default instead writes idle on first and then off, as the
+// reference host did.
+bool start(bool require_sensor = true, bool an_sequence = false);
+
+// Training-pattern words seen in the INITIAL PRE-SYNC row by the most recent start(),
+// out of naneye::ROW_PP. 0xAAA and 0x555 both count: the alternating pattern reads as one
+// or the other depending on whether the word phase is off by an odd number of bits.
+uint32_t presync_training();
+
+// Bring-up: the reference host's power-up sequence, reproduced verbatim from the decoded
+// capture (spec.md section 3.2) rather than from the documentation. Activation clock;
+// CONFIG_0=0x009F, CONFIG_1=0x009F (idle on); 1,279,318 clocks with SDAT held low; then
+// CONFIG_0=0x009F, CONFIG_1=0x0065 (idle off) padded with driven zeros to a full 648-PP
+// interface window. Leaves SDAT released and the sensor powered; follow with LISTEN.
+// verbatim: the reference's exact CONFIG_1 values. fast_first: the first write pair at
+// SCLK rate as the reference host did, not bit-banged. early_release: release SDAT right
+// after the idle-off write instead of driving zeros to the end of the interface window.
+// first_only: stop after the first (idle-on) write pair and release SDAT, to see what the
+// sensor does in idle.
+void start_reference(bool verbatim = false, bool fast_first = false,
+                     bool early_release = false, bool first_only = false);
 void stop();
 bool streaming();
 
@@ -84,5 +124,20 @@ void probe_sync(SyncReport& report, uint32_t rows);
 // AN000611 implies it does not. 0x000 means silent (SDAT is pulled down), 0xFFFF means no
 // frame has run yet. Bring-up (M2) should settle which.
 uint16_t last_interface_pp();
+
+// Bring-up diagnostic: clock `rows` row-sized bursts (3936 clocks each) with SDAT released
+// the whole time, and classify what the sensor sends in each. It never drives SDAT, so it
+// is safe whatever phase the sensor is in -- the tool for finding out what the sensor is
+// doing when START does not see what it expects. Continues from wherever the clock count
+// currently is; needs the sensor powered.
+struct ListenReport {
+    uint32_t rows;
+    int32_t first_active_row;  // first row with any non-zero word, -1 if none
+    uint32_t words_555, words_AAA, words_zero, words_pixel, words_other;
+    uint16_t first_active_words[12];
+};
+// map receives one character per row: '.' all zero, 'S' mostly 0x555, 'A' mostly 0xAAA,
+// 'P' mostly pixel words, '?' anything else. NUL-terminated if map_len > rows.
+void listen(uint32_t rows, ListenReport& rep, char* map, uint32_t map_len);
 
 }  // namespace seim

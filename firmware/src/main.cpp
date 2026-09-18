@@ -19,6 +19,7 @@
 #include "naneye_seim.h"
 #include "seim_unpack.h"
 #include "usb_proto.h"
+#include "watchdog.h"
 
 using namespace naneye;
 
@@ -82,6 +83,23 @@ static void tx_pump() {
     if (s_tx.sent >= s_tx.total) s_tx.active = false;
 }
 
+// A reply must never be written into the middle of an image packet that is still going
+// out: the host would read the reply as payload, the image would fail its CRC, and the
+// reply would be discarded with it. Commands are handled between frames, so finish the
+// image first. Normally that takes a few ms, since the host is reading in order to get the
+// reply. If the host has stopped reading, give up after timeout_ms; the host resyncs past
+// the truncated packet on its magic word.
+static void finish_tx(uint32_t timeout_ms) {
+    const uint32_t t0 = millis();
+    while (s_tx.active && (millis() - t0) < timeout_ms) {
+        tx_pump();
+        yield();
+    }
+    s_tx.active = false;
+}
+
+static bool s_force_start = false;
+
 static size_t frame_payload_bytes(uint8_t format) {
     return (size_t)row_payload_bytes(format) * HEIGHT;
 }
@@ -123,18 +141,81 @@ static void selftest() {
           (e1 == 105616u && e2 == 22304u) ? "PASS" : "FAIL");
 }
 
+// LISTEN's work, shared with START REF so the two can run back to back with no gap in the
+// clock: the sensor turned out not to tolerate a long clock pause during INITIAL PRE-SYNC.
+static void listen_and_report(uint32_t rows) {
+    if (rows > 2000) rows = 2000;
+    static char map[2001];
+    seim::ListenReport rep;
+    seim::listen(rows, rep, map, sizeof(map));
+
+    reply("LISTEN %lu rows: 0x555=%lu 0xAAA=%lu 0x000=%lu pixel=%lu other=%lu  "
+          "first active row %ld",
+          (unsigned long)rep.rows, (unsigned long)rep.words_555,
+          (unsigned long)rep.words_AAA, (unsigned long)rep.words_zero,
+          (unsigned long)rep.words_pixel, (unsigned long)rep.words_other,
+          (long)rep.first_active_row);
+    if (rep.first_active_row >= 0) {
+        const uint16_t* w = rep.first_active_words;
+        reply("LISTEN first active row starts: %03X %03X %03X %03X %03X %03X %03X %03X "
+              "%03X %03X %03X %03X",
+              w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[10], w[11]);
+    }
+
+    // Row map, run-length encoded so it fits in replies: e.g. ".x2 Sx4 Px320".
+    char line[180];
+    size_t len = 0;
+    for (uint32_t i = 0; i < rep.rows;) {
+        uint32_t j = i;
+        while (j < rep.rows && map[j] == map[i]) j++;
+        char seg[24];
+        const int n = (j - i > 1)
+                          ? snprintf(seg, sizeof(seg), "%cx%lu ", map[i], (unsigned long)(j - i))
+                          : snprintf(seg, sizeof(seg), "%c ", map[i]);
+        if (len + (size_t)n >= sizeof(line) - 1) {
+            line[len] = 0;
+            reply("LISTEN map: %s", line);
+            len = 0;
+        }
+        memcpy(line + len, seg, (size_t)n);
+        len += (size_t)n;
+        i = j;
+    }
+    line[len] = 0;
+    if (len) reply("LISTEN map: %s", line);
+}
+
 static void handle_command(char* line) {
-    // Split into a verb and up to three arguments.
-    char* tok[4] = {nullptr, nullptr, nullptr, nullptr};
+    // Split into a verb and up to seven arguments.
+    char* tok[8] = {};
     int n = 0;
-    for (char* p = strtok(line, " \t"); p && n < 4; p = strtok(nullptr, " \t")) tok[n++] = p;
+    for (char* p = strtok(line, " \t"); p && n < 8; p = strtok(nullptr, " \t")) tok[n++] = p;
     if (n == 0) return;
     for (char* p = tok[0]; *p; p++) *p = (char)toupper(*p);
 
     if (!strcmp(tok[0], "ID")) {
-        reply("naneye-teensy %s  sclk=%lu Hz  cfg0=0x%04X cfg1=0x%04X  fmt=%u",
-              FW_VERSION, (unsigned long)seim::sclk_hz(), seim::config0(), seim::config1(),
-              s_format);
+        reply("naneye-teensy %s  sclk=%lu Hz (nominal %lu, LPSPI root %lu Hz)  "
+              "cfg0=0x%04X cfg1=0x%04X  fmt=%u  last reset: %s (SRSR 0x%03lX)",
+              FW_VERSION, (unsigned long)seim::sclk_hz(),
+              (unsigned long)seim::nominal_sclk_hz(), (unsigned long)seim::lpspi_root_hz(),
+              seim::config0(), seim::config1(), s_format,
+              watchdog::last_reset_was_watchdog() ? "WATCHDOG" : "normal",
+              (unsigned long)watchdog::reset_status());
+    } else if (!strcmp(tok[0], "CLKMEAS")) {
+        if (s_run || seim::powered()) {
+            reply("CLKMEAS needs the sensor powered off (the clocks would advance it): "
+                  "STOP and POWER 0 first");
+        } else {
+            const uint32_t measured = seim::measure_sclk_hz();
+            const uint32_t expect = seim::nominal_sclk_hz();
+            const int32_t err_ppm =
+                expect ? (int32_t)(((int64_t)measured - expect) * 1000000 / expect) : 0;
+            reply("CLKMEAS measured %lu Hz  nominal %lu Hz  derived %lu Hz  error %+ld ppm "
+                  "(frame gaps make it read slightly low) -> %s",
+                  (unsigned long)measured, (unsigned long)expect,
+                  (unsigned long)seim::sclk_hz(), (long)err_ppm,
+                  (measured && err_ppm > -20000 && err_ppm < 5000) ? "PASS" : "FAIL");
+        }
     } else if (!strcmp(tok[0], "POWER")) {
         seim::power(parse_u32(tok[1], 1) != 0);
         reply("POWER %d", seim::powered() ? 1 : 0);
@@ -149,13 +230,42 @@ static void handle_command(char* line) {
         seim::set_delayed_sample(parse_u32(tok[1], 0) != 0);
         reply("SAMPLE %d", seim::delayed_sample() ? 1 : 0);
     } else if (!strcmp(tok[0], "START")) {
-        if (seim::start()) {
+        if (n > 1 && !strcasecmp(tok[1], "REF")) {
+            // START REF [rows]: with rows, listen straight away, with no gap in the clock.
+            s_run = false;
+            bool verbatim = false, fast = false, early = false, first = false;
+            uint32_t rows = 0;
+            for (int k = 2; k < n; k++) {
+                if (!strcasecmp(tok[k], "VERBATIM")) verbatim = true;
+                else if (!strcasecmp(tok[k], "FAST")) fast = true;
+                else if (!strcasecmp(tok[k], "EARLY")) early = true;
+                else if (!strcasecmp(tok[k], "FIRST")) first = true;
+                else rows = parse_u32(tok[k], 0);
+            }
+            seim::start_reference(verbatim, fast, early, first);
+            if (rows) listen_and_report(rows);
+            reply("START REF done: cfg0=0x%04X cfg1=0x%04X, SDAT released%s",
+                  seim::config0(), seim::config1(),
+                  rows ? " (listened with no clock gap)" : ". Now LISTEN.");
+            return;
+        }
+        bool an = false;
+        s_force_start = false;
+        for (int k = 1; k < n; k++) {
+            if (!strcasecmp(tok[k], "FORCE")) s_force_start = true;
+            if (!strcasecmp(tok[k], "AN")) an = true;  // AN000611 single-write sequence
+        }
+        if (seim::start(!s_force_start, an)) {
             s_run = true;
-            reply("START ok  streaming");
+            reply("START ok  streaming  (pre-sync training %lu/%u)%s",
+                  (unsigned long)seim::presync_training(), (unsigned)ROW_PP,
+                  s_force_start ? "  FORCED: frames are not from a verified sensor" : "");
         } else {
             s_run = false;
-            reply("START failed: no training pattern from the sensor. Check power, wiring "
-                  "and that SDAT reaches the sensor.");
+            reply("START failed: pre-sync training pattern %lu/%u words. No sensor answering: "
+                  "check power, wiring and that SDAT reaches the sensor. "
+                  "START FORCE streams anyway, to test the USB path.",
+                  (unsigned long)seim::presync_training(), (unsigned)ROW_PP);
         }
     } else if (!strcmp(tok[0], "STOP")) {
         s_run = false;
@@ -242,6 +352,27 @@ static void handle_command(char* line) {
               rep.first_words[0], rep.first_words[1], rep.first_words[2], rep.first_words[3],
               rep.first_words[4], rep.first_words[5], rep.first_words[6], rep.first_words[7],
               rep.first_words[8], rep.first_words[9]);
+    } else if (!strcmp(tok[0], "LISTEN")) {
+        if (s_run) {
+            reply("LISTEN needs streaming stopped: STOP first");
+        } else if (!seim::powered()) {
+            reply("LISTEN needs the sensor powered: POWER 1 or START first");
+        } else {
+            listen_and_report(parse_u32(tok[1], 400));
+        }
+    } else if (!strcmp(tok[0], "WDTEST")) {
+        // Hang on purpose: the watchdog must reset the board within 2 s, after which the
+        // port re-enumerates and ID reports "last reset: WATCHDOG".
+        reply("WDTEST hanging now; expect a watchdog reset in %lu ms",
+              (unsigned long)watchdog::WATCHDOG_TIMEOUT_MS);
+        Serial.flush();
+        seim::power(false);
+        for (;;) {
+        }
+    } else if (!strcmp(tok[0], "ALIGN")) {
+        if (n > 1) seim::set_align_clocks(parse_u32(tok[1], 10));
+        reply("ALIGN %lu clocks between the idle-off write and pre-sync",
+              (unsigned long)seim::align_clocks());
     } else if (!strcmp(tok[0], "STATS")) {
         reply("STATS frames=%lu sent=%lu dropped=%lu streaming=%d powered=%d "
               "end_of_interface=0x%03X",
@@ -251,14 +382,14 @@ static void handle_command(char* line) {
     } else if (!strcmp(tok[0], "SELFTEST")) {
         selftest();
     } else {
-        reply("unknown command '%s'. Try ID POWER CLK SAMPLE START STOP DEPTH EXP GAIN REG "
-              "LED LEDI LEDMAX PROBE STATS SELFTEST",
+        reply("unknown command '%s'. Try ID POWER CLK CLKMEAS SAMPLE START STOP DEPTH EXP "
+              "GAIN REG LED LEDI LEDMAX PROBE STATS SELFTEST",
               tok[0]);
     }
 }
 
-// Accept either a bare ASCII line (so the port is usable from a terminal) or a framed
-// type-1 command packet. Device output is always framed.
+// Commands arrive as plain ASCII lines, so the port is usable from a terminal. Device
+// output is always framed (spec.md section 7).
 static void poll_commands() {
     static char line[128];
     static size_t len = 0;
@@ -268,7 +399,10 @@ static void poll_commands() {
         if (c == '\r') continue;
         if (c == '\n') {
             line[len] = 0;
-            if (len) handle_command(line);
+            if (len) {
+                finish_tx(200);  // never interleave a reply into an image in flight
+                handle_command(line);
+            }
             len = 0;
         } else if (len < sizeof(line) - 1) {
             line[len++] = (char)c;
@@ -279,6 +413,7 @@ static void poll_commands() {
 }
 
 void setup() {
+    watchdog::begin();
     Serial.begin(115200);  // rate is ignored for USB CDC
     proto::crc32_init();
     led::begin();
@@ -286,6 +421,7 @@ void setup() {
 }
 
 void loop() {
+    watchdog::feed();
     poll_commands();
     tx_pump();
 
@@ -310,7 +446,7 @@ void loop() {
         s_frames_dropped++;
         proto::send_text(proto::TYPE_LOG, "capture failed, re-syncing (rows_failed=%lu)",
                          (unsigned long)info.rows_failed);
-        s_run = seim::start();
+        s_run = seim::start(!s_force_start);  // power-cycles the sensor first
         return;
     }
 

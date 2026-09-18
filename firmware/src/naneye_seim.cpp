@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "board.h"
+#include "watchdog.h"
 
 namespace seim {
 
@@ -27,6 +28,7 @@ constexpr uint32_t SR_REF = 1u << 12;  // receive error (FIFO overflow)
 
 constexpr uint32_t CFGR1_MASTER = 1u << 0;
 constexpr uint32_t CFGR1_SAMPLE = 1u << 1;
+constexpr uint32_t CFGR1_OUTCFG = 1u << 26;  // tristate SDO when the frame's PCS negates
 
 constexpr uint32_t DER_RDDE = 1u << 1;
 
@@ -53,12 +55,24 @@ constexpr uint32_t SPIN_LIMIT = 40000000u;
 #define LPSPI IMXRT_LPSPI3_S
 
 // Two row buffers, each with one extra word of padding so pp_at() may read w[wi + 1].
-static DMAMEM uint32_t s_row[2][ROW_WORDS_PADDED] __attribute__((aligned(32)));
+//
+// DMAMEM is OCRAM, which the Cortex-M7 D-cache covers (write-back). The DMA writes RAM
+// behind the cache's back, so every completed row must be invalidated before the CPU reads
+// it, or it reads whatever the cache still holds. Until that was done the sensor was
+// streaming perfect frames on pin 1 -- seen on the logic analyser -- while LISTEN read all
+// zeros or stale 0xAAA. Each row gets whole cache lines to itself so invalidating one can
+// never touch the other.
+constexpr uint32_t CACHE_LINE = 32;
+constexpr uint32_t ROW_BUF_WORDS =
+    (ROW_WORDS_PADDED * 4 + CACHE_LINE - 1) / CACHE_LINE * CACHE_LINE / 4;
+static DMAMEM uint32_t s_row[2][ROW_BUF_WORDS] __attribute__((aligned(32)));
+static uint32_t* s_row_pending = nullptr;
 static DMAChannel s_rx;
 
 static bool s_powered = false;
 static bool s_streaming = false;
 static bool s_delayed_sample = false;
+static uint32_t s_align_clocks = 10;
 static bool s_first_frame_after_por = true;
 static uint16_t s_cfg0 = REF_CONFIG0;
 static uint16_t s_cfg1 = REF_CONFIG1_IDLE;
@@ -70,6 +84,7 @@ static uint32_t s_pad_sclk = 0;
 // What arrived on SDAT in the final pixel period of the last INTERFACE MODE, which we leave
 // to the sensor (see interface_window). 0xFFFF until the first frame has run.
 static uint16_t s_last_interface_pp = 0xFFFF;
+static uint32_t s_presync_training = 0;
 
 // The NanoBerry's R13 and R33 (10k pull-downs on SDAT and SCLK at the header) are not
 // fitted, and SPI1.begin() configures these pads with no pull at all, so both nets would
@@ -156,6 +171,9 @@ static inline bool send24(uint32_t word) {
 
 // Start a row transfer: 3936 clocks, output masked, received words DMA'd into buf.
 static inline void start_row(uint32_t* buf) {
+    // Drop any cached copy first, so no line can be evicted over the DMA's data.
+    arm_dcache_delete(buf, sizeof(s_row[0]));
+    s_row_pending = buf;
     s_rx.destinationBuffer(buf, ROW_WORDS * 4);
     s_rx.enable();
     LPSPI.TCR = tcr_base() | reg::framesz(ROW_BITS) | reg::TCR_TXMSK;
@@ -168,6 +186,8 @@ static inline bool wait_row() {
     }
     s_rx.clearComplete();
     LPSPI.SR = reg::SR_FCF;
+    // And again now it is complete: the CPU may have pulled lines in meanwhile.
+    arm_dcache_delete(s_row_pending, sizeof(s_row[0]));
     return true;
 }
 
@@ -175,7 +195,14 @@ static void configure_lpspi() {
     LPSPI.CR = 0;
     LPSPI.CR = reg::CR_RST;
     LPSPI.CR = 0;
-    LPSPI.CFGR1 = reg::CFGR1_MASTER | (s_delayed_sample ? reg::CFGR1_SAMPLE : 0u);
+    // OUTCFG: measured on hardware, with OUTCFG=0 ("retain last value") LPSPI drives SDO
+    // HIGH about 48 ns after the last clock of every transmit frame -- when the internal
+    // PCS negates. After the interface filler that left SDAT charged to 3.56 V at the
+    // moment of release, decaying through the 100k pull-down (tau ~2.5 us) across the whole
+    // last-PP window and into SYNC. With OUTCFG=1 SDO is tristated instead, so the pad
+    // pull-down holds it where the last bit left it: low.
+    LPSPI.CFGR1 = reg::CFGR1_MASTER | reg::CFGR1_OUTCFG |
+                  (s_delayed_sample ? reg::CFGR1_SAMPLE : 0u);
     // SCK = root / (SCKDIV + 2). DBT = 0 keeps the gap between frames as short as possible,
     // so row boundaries cost the sensor as little as possible (spec.md section 6.5).
     LPSPI.CCR = (uint32_t)s_clock->sckdiv;
@@ -218,13 +245,48 @@ static void bitbang_clocks(uint32_t n, bool drive_sdat) {
     }
 }
 
+// One 24-bit register write, bit-banged at about 1 MHz. At power-up output_mode defaults
+// to LVDS, and in LVDS mode the configuration interface is specified only up to
+// fSCLK_LVDS = 2.5 MHz (DS000503 Table 7). The writes that select SEIM therefore have to go
+// out slowly; only once SEIM is selected does the 75 MHz fSCLK_SEIM limit apply.
+// SDAT changes while SCLK is low; the sensor captures on the rising edge.
+static void bitbang_write24(uint32_t word) {
+    pinMode(board::PIN_SCLK, OUTPUT);
+    pinMode(board::PIN_SDAT_OUT, OUTPUT);
+    digitalWriteFast(board::PIN_SCLK, LOW);
+    for (int b = 23; b >= 0; b--) {
+        digitalWriteFast(board::PIN_SDAT_OUT, (word >> b) & 1);
+        delayNanoseconds(500);
+        digitalWriteFast(board::PIN_SCLK, HIGH);
+        delayNanoseconds(500);
+        digitalWriteFast(board::PIN_SCLK, LOW);
+    }
+    digitalWriteFast(board::PIN_SDAT_OUT, LOW);
+    delayNanoseconds(500);
+    *portControlRegister(board::PIN_SCLK) = s_pad_sclk;
+    *portConfigRegister(board::PIN_SCLK) = s_mux_sclk;
+    *portControlRegister(board::PIN_SDAT_OUT) = s_pad_sdat;
+    *portConfigRegister(board::PIN_SDAT_OUT) = s_mux_sdat;
+}
+
 // --- Setup -----------------------------------------------------------------------------
 void begin() {
     pinMode(board::PIN_SENSOR_EN, OUTPUT);
     digitalWriteFast(board::PIN_SENSOR_EN, LOW);  // sensor stays off until asked
     pinMode(board::PIN_SDAT_IN, INPUT);
 
+    // Let the core library mux the pins, then remember the values so the SDAT direction can
+    // be flipped, and the pins reclaimed after bit-banging, with single register writes.
+    SPI1.begin();
+
     // LPSPI root clock = PLL2_PFD2 (396 MHz) / 4 = 99 MHz (spec.md section 5.3).
+    //
+    // This MUST come after SPI1.begin(): the core's begin() writes CBCMR itself, selecting
+    // PLL3_PFD0 / 3 = 240 MHz. Done the other way round -- as it was until the first test
+    // on hardware -- every rate came out 2.4x too fast: "12.375 MHz" ran at 30 MHz and
+    // "49.5 MHz" at 120 MHz, past the sensor's 75 MHz maximum. Measured, not assumed:
+    // 22.5 fps where 9.6 fps is the ceiling at 12.375 MHz.
+    //
     // The clock gate must be off while CBCMR is changed.
     CCM_CCGR1 &= ~CCM_CCGR1_LPSPI3(CCM_CCGR_ON);
     uint32_t cbcmr = CCM_CBCMR;
@@ -232,10 +294,6 @@ void begin() {
     cbcmr |= CCM_CBCMR_LPSPI_PODF(3) | CCM_CBCMR_LPSPI_CLK_SEL(3);  // /4, PLL2_PFD2
     CCM_CBCMR = cbcmr;
     CCM_CCGR1 |= CCM_CCGR1_LPSPI3(CCM_CCGR_ON);
-
-    // Let the core library mux the pins, then remember the values so the SDAT direction can
-    // be flipped, and the pins reclaimed after bit-banging, with single register writes.
-    SPI1.begin();
     add_pulldown(board::PIN_SCLK);
     add_pulldown(board::PIN_SDAT_OUT);
     add_pulldown(board::PIN_SDAT_IN);
@@ -253,11 +311,28 @@ void begin() {
     sdat_hiz();
 }
 
+// The NanoBerry's sensor rail has no discharge path: measured after EN goes low, it is
+// still at 0.5 V after 143 ms and only below 0.1 V after 630 ms. Powering back up sooner
+// risks a sensor that never saw a clean power-on reset, and the start-up sequence depends
+// on one -- starts after a 0.4 s off-time failed. So power(true) makes sure the rail has
+// been off at least this long, however soon after power(false) it is called.
+constexpr uint32_t POR_OFF_MS = 1000;
+static uint32_t s_off_since_ms = 0;
+static bool s_ever_powered = false;
+
 void power(bool on) {
+    if (on && !s_powered && s_ever_powered) {
+        while ((uint32_t)(millis() - s_off_since_ms) < POR_OFF_MS) {
+            watchdog::feed();
+            delay(10);
+        }
+    }
     digitalWriteFast(board::PIN_SENSOR_EN, on ? HIGH : LOW);
+    if (s_powered && !on) s_off_since_ms = millis();
     s_powered = on;
     s_streaming = false;
     if (on) {
+        s_ever_powered = true;
         delay(5);  // LDO ramp plus the sensor's internal power-on reset
         s_first_frame_after_por = true;
     }
@@ -275,7 +350,43 @@ const ClockSetting& set_clock(uint32_t want_hz) {
     return *s_clock;
 }
 
-uint32_t sclk_hz() { return s_clock->sclk_hz; }
+// The LPSPI root clock as the hardware is actually configured, decoded from CBCMR the same
+// way the core library does. Derived rather than assumed, so a frame header can never
+// report a rate the peripheral is not running at -- which is exactly what happened when
+// SPI1.begin() silently replaced our setting.
+uint32_t lpspi_root_hz() {
+    static const uint32_t sel_hz[4] = {
+        664615384u,  // PLL3 PFD1
+        720000000u,  // PLL3 PFD0
+        528000000u,  // PLL2
+        396000000u,  // PLL2 PFD2
+    };
+    const uint32_t cbcmr = CCM_CBCMR;
+    return sel_hz[(cbcmr >> 4) & 0x3u] / (((cbcmr >> 26) & 0x7u) + 1u);
+}
+
+uint32_t sclk_hz() { return lpspi_root_hz() / ((uint32_t)s_clock->sckdiv + 2u); }
+
+uint32_t nominal_sclk_hz() { return s_clock->sclk_hz; }
+
+// Time real SCLK cycles against the CPU cycle counter: an independent check of the clock
+// that needs no logic analyser. Clocks max-size frames with output and input masked, so it
+// includes the small gap between frames and reads a fraction of a percent low.
+//
+// Only with the sensor unpowered: the sensor advances its state machine on these clocks.
+uint32_t measure_sclk_hz() {
+    if (s_powered) return 0;
+    const uint32_t frames = 24;
+    const uint32_t t0 = ARM_DWT_CYCCNT;
+    for (uint32_t i = 0; i < frames; i++) {
+        LPSPI.TCR = tcr_base() | reg::framesz(MAX_FRAME_BITS) | reg::TCR_TXMSK |
+                    reg::TCR_RXMSK;
+        if (!wait_frame()) return 0;
+    }
+    const uint32_t cycles = ARM_DWT_CYCCNT - t0;
+    if (!cycles) return 0;
+    return (uint32_t)((uint64_t)frames * MAX_FRAME_BITS * F_CPU_ACTUAL / cycles);
+}
 
 void set_delayed_sample(bool on) {
     s_delayed_sample = on;
@@ -283,6 +394,9 @@ void set_delayed_sample(bool on) {
 }
 
 bool delayed_sample() { return s_delayed_sample; }
+
+void set_align_clocks(uint32_t n) { s_align_clocks = n; }
+uint32_t align_clocks() { return s_align_clocks; }
 
 void set_config(uint16_t cfg0, uint16_t cfg1) {
     s_cfg0 = cfg0;
@@ -332,38 +446,268 @@ static void interface_window(uint16_t cfg0, uint16_t cfg1) {
 
 uint16_t last_interface_pp() { return s_last_interface_pp; }
 
+void listen(uint32_t rows, ListenReport& rep, char* map, uint32_t map_len) {
+    memset(&rep, 0, sizeof(rep));
+    rep.first_active_row = -1;
+    sdat_hiz();
+    for (uint32_t r = 0; r < rows; r++) {
+        watchdog::feed();  // LISTEN 2000 takes ~0.7 s
+        start_row(s_row[0]);
+        if (!wait_row()) {
+            s_rx.disable();
+            break;
+        }
+        uint32_t n555 = 0, nAAA = 0, nzero = 0, npix = 0;
+        for (uint32_t i = 0; i < ROW_PP; i++) {
+            const uint16_t w = pp_at(s_row[0], i);
+            if (w == WORD_TRAINING) n555++;
+            else if (w == WORD_PRESYNC) nAAA++;
+            else if (w == WORD_EOF) nzero++;
+            else if (word_is_pixel(w)) npix++;
+        }
+        const uint32_t nother = ROW_PP - n555 - nAAA - nzero - npix;
+        rep.words_555 += n555;
+        rep.words_AAA += nAAA;
+        rep.words_zero += nzero;
+        rep.words_pixel += npix;
+        rep.words_other += nother;
+        if (rep.first_active_row < 0 && nzero < ROW_PP) {
+            rep.first_active_row = (int32_t)r;
+            for (uint32_t i = 0; i < 12; i++) rep.first_active_words[i] = pp_at(s_row[0], i);
+        }
+        char c = '?';
+        if (nzero == ROW_PP) c = '.';
+        else if (n555 * 2 > ROW_PP) c = 'S';
+        else if (nAAA * 2 > ROW_PP) c = 'A';
+        else if (npix * 2 > ROW_PP) c = 'P';
+        if (r + 1 < map_len) map[r] = c;
+        rep.rows = r + 1;
+    }
+    if (map_len) map[rep.rows < map_len ? rep.rows : map_len - 1] = 0;
+}
+
 static inline uint32_t sync_delay_pp() {
     return SYNC_PP + rows_delay_pp(Config1::unpack(s_cfg1).rows_delay);
 }
 
-bool start() {
-    if (!s_powered) power(true);
+uint32_t presync_training() { return s_presync_training; }
+
+// The reference's CONFIG_1 values with the clock bits replaced to match the SCLK actually
+// in use: the reference ran at 31.25 MHz and its 0x0065 says so (mclk default, high speed).
+static uint16_t ref_cfg1(uint16_t reference) {
+    Config1 c = Config1::unpack(reference);
+    c.mclk_mode = s_clock->mclk_mode;
+    c.high_speed = s_clock->high_speed;
+    return c.pack();
+}
+
+void start_reference(bool verbatim, bool fast_first, bool early_release, bool first_only) {
+    s_streaming = false;
+    if (s_powered) power(false);  // needs a fresh power-on reset, like start()
+    power(true);
+    // verbatim: the reference's exact register values, clock bits and all.
+    const uint16_t cfg1_idle = verbatim ? 0x009F : ref_cfg1(0x009F);
+    const uint16_t cfg1_run = verbatim ? 0x0065 : ref_cfg1(0x0065);
+    s_cfg0 = 0x009F;
+    s_cfg1 = cfg1_run;
+    bitbang_clocks(1, true);
+    if (fast_first) {
+        sdat_drive();
+        send24(reg_write_packet(0, 0x009F));
+        send24(reg_write_packet(1, cfg1_idle));
+    } else {
+        bitbang_write24(reg_write_packet(0, 0x009F));
+        bitbang_write24(reg_write_packet(1, cfg1_idle));
+    }
+    if (first_only) {
+        sdat_hiz();
+        return;
+    }
+    // The reference clocked exactly this many times, SDAT low, before releasing idle -- the
+    // count of 10 alignment clocks + INITIAL PRE-SYNC + SYNC/DELAY + one frame.
+    sdat_drive();
+    drive_zeros(10 + (PRESYNC_PP + 2 * SYNC_PP + READOUT_PP) * PP_BITS);
+    send24(reg_write_packet(0, 0x009F));
+    send24(reg_write_packet(1, cfg1_run));
+    if (!early_release) drive_zeros(INTERFACE_BITS - 2 * REG_WRITE_BITS);
+    sdat_hiz();
+}
+
+// Clock `bits` clocks with the output masked, discarding everything received. Bit-granular,
+// unlike clock_pp_discard(): it is what moves the transfers onto the sensor's row phase.
+static bool clock_bits_discard(uint32_t bits) {
+    while (bits) {
+        const uint32_t chunk = bits > MAX_FRAME_BITS ? MAX_FRAME_BITS : bits;
+        LPSPI.TCR = tcr_base() | reg::framesz(chunk) | reg::TCR_TXMSK | reg::TCR_RXMSK;
+        if (!wait_frame()) return false;
+        bits -= chunk;
+    }
+    return true;
+}
+
+static inline uint32_t row_bit(const uint32_t* w, uint32_t i) {
+    return (w[i >> 5] >> (31u - (i & 31u))) & 1u;
+}
+
+// Find the first frame's row phase in the received bits and move the transfers onto it,
+// then discard the rest of that frame, leaving the link at the start of INTERFACE MODE.
+//
+// How long the first frame's training lasts, counted in SCLK clocks, varies from start to
+// start (12,074 to 12,084 bits measured, and not in whole pixel periods), so the row phase
+// cannot be counted from the idle-off write: it has to be found, as any serial receiver
+// would. Row 0 of the first frame is trained with 0xAAA, which runs straight on into its
+// first pixel's start bit, so the lock is on row 1: a run of about 96 alternating bits
+// (8 x 0x555, ending in 1) broken by two 1s -- the second is pixel 0's start bit. The row
+// after that is then checked for its 8 training words before anything is trusted.
+static bool lock_row_phase() {
+    constexpr uint32_t MAX_SEARCH_ROWS = 8;  // training is ~3 rows long
+    uint32_t last = 2;                      // no previous bit yet
+    uint32_t run = 0;                       // alternations in the current run
+    bool seen_long = false;                 // the first frame's long training run
+    for (uint32_t row = 0; row < MAX_SEARCH_ROWS; row++) {
+        start_row(s_row[0]);
+        if (!wait_row()) {
+            s_rx.disable();
+            return false;
+        }
+        for (uint32_t i = 0; i < ROW_BITS; i++) {
+            const uint32_t b = row_bit(s_row[0], i);
+            if (b != last && last != 2) {
+                run++;
+            } else {
+                if (seen_long && run >= 90 && run < 200 && b == 1) {
+                    // Bit i is row 1's pixel-0 start bit; row 1 began 96 bits earlier.
+                    // Move to the next row boundary still ahead of us.
+                    const uint32_t next_row = (i >= 96) ? 2 : 3;
+                    const uint32_t skip = (i >= 96) ? i - 96 : i - 96 + ROW_BITS;
+                    if (skip && !clock_bits_discard(skip)) return false;
+                    start_row(s_row[0]);
+                    if (!wait_row()) {
+                        s_rx.disable();
+                        return false;
+                    }
+                    if (count_training(s_row[0], WORD_TRAINING) < TRAINING_PP) return false;
+                    // Rest of the frame: the rows after this one, then EOF.
+                    return clock_pp_discard((HEIGHT - 1 - next_row) * ROW_PP + EOF_PP);
+                }
+                if (run >= 1000) seen_long = true;
+                run = 0;
+            }
+            last = b;
+        }
+    }
+    return false;
+}
+
+// The start-up that works on hardware, every time: the reference host's sequence, with our
+// own register values (spec.md section 3.2):
+//
+//   1 activation clock, CONFIG_0 + CONFIG_1 (SEIM, idle on), bit-banged at ~1 MHz
+//   REF_IDLE_CLOCKS clocks with SDAT driven low -- what the reference does, one frame's worth
+//   CONFIG_0 + CONFIG_1 (idle off) at SCLK rate, then zeros to the end of a 648 PP window
+//   release SDAT: the sensor sends ~1000 PP of training (INITIAL PRE-SYNC + SYNC, no DELAY
+//   in this first frame), then the first frame's 320 rows, then EOF
+//
+// and then lock_row_phase(). The datasheet's own sequence (AN000611) did not start reliably
+// on this board, and its fixed phase count left every row 2 clocks off.
+static constexpr uint32_t REF_IDLE_CLOCKS =
+    10 + (PRESYNC_PP + 2 * SYNC_PP + READOUT_PP) * PP_BITS;
+
+static bool start_like_reference(Config1 c1, bool require_sensor) {
+    // The first frame always runs with the minimum delay, so the frame lock_row_phase()
+    // discards has a known length. The real value goes out in the first capture's
+    // interface window.
+    Config1 first = c1;
+    first.rows_delay = 0;
+    first.idle_mode = 1;
+    const uint16_t cfg1_idle = first.pack();
+    first.idle_mode = 0;
+    const uint16_t cfg1_run = first.pack();
+    c1.idle_mode = 0;
+    s_cfg1 = c1.pack();
+
+    bitbang_clocks(1, true);
+    bitbang_write24(reg_write_packet(0, s_cfg0));
+    bitbang_write24(reg_write_packet(1, cfg1_idle));
+    sdat_drive();
+    if (!drive_zeros(REF_IDLE_CLOCKS)) return false;
+    if (!send24(reg_write_packet(0, s_cfg0))) return false;
+    if (!send24(reg_write_packet(1, cfg1_run))) return false;
+    if (!drive_zeros(INTERFACE_BITS - 2 * REG_WRITE_BITS)) return false;
+    sdat_hiz();
+
+    // First training row: the "is there a sensor at all?" check.
+    start_row(s_row[0]);
+    if (!wait_row()) {
+        s_rx.disable();
+        return false;
+    }
+    for (uint32_t i = 0; i < ROW_PP; i++) {
+        const uint16_t w = pp_at(s_row[0], i);
+        if (w == WORD_PRESYNC || w == WORD_TRAINING) s_presync_training++;
+    }
+    if (require_sensor && s_presync_training < ROW_PP / 2) return false;
+
+    // Lock onto the first frame's rows, then discard the rest of it: its exposure is invalid
+    // (datasheet 6.3.3; confirmed saturated in the reference capture, spec.md section 3.5).
+    if (!lock_row_phase() && require_sensor) return false;
+
+    s_first_frame_after_por = false;
+    s_streaming = true;
+    return true;
+}
+
+bool start(bool require_sensor, bool an_sequence) {
+    s_streaming = false;
+    s_presync_training = 0;
+    // Both sequences need a sensor fresh from power-on reset.
+    if (s_powered) power(false);
+    power(true);
 
     Config1 c1 = Config1::unpack(s_cfg1);
     c1.output_mode = 0;  // SEIM
     c1.mclk_mode = s_clock->mclk_mode;
     c1.high_speed = s_clock->high_speed;
 
-    // INITIAL INTERFACE MODE: one activation clock, then select SEIM with idle still on, as
-    // the reference host does (spec.md section 3.2).
+    if (!an_sequence) return start_like_reference(c1, require_sensor);
+
+    // AN000611's single-write sequence, kept for comparison only. On hardware it is not
+    // reliable: some starts see no pre-sync at all, and when it does start, the phase count
+    // below lands every row 2 clocks late (tools/check_alignment.py), so every row fails.
     bitbang_clocks(1, true);  // activation clock, SDAT low as in the reference capture
-    c1.idle_mode = 1;
-    sdat_drive();
-    send24(reg_write_packet(0, s_cfg0));
-    send24(reg_write_packet(1, c1.pack()));
-    delayMicroseconds(20);
 
     // Release idle: the sensor starts streaming after this write.
     c1.idle_mode = 0;
     s_cfg1 = c1.pack();
-    send24(reg_write_packet(0, s_cfg0));
-    send24(reg_write_packet(1, s_cfg1));
+    bitbang_write24(reg_write_packet(0, s_cfg0));
+    bitbang_write24(reg_write_packet(1, s_cfg1));
     sdat_hiz();
+
+    // AN000611 section 3.3 waits here -- after the idle-off write, before the alignment
+    // clocks -- "for IDLE start-up", 10 us minimum, "longer times are also possible". This
+    // pause used to sit between the two write pairs instead, so the alignment clocks arrived
+    // about a microsecond after idle was released, while the sensor was still starting up.
+    delayMicroseconds(100);
 
     // 10 alignment clocks fix the 12-bit word phase, then INITIAL PRE-SYNC MODE. SDAT is
     // left released: the sensor is already transmitting by this point.
-    bitbang_clocks(10, false);
-    if (!clock_pp_discard(PRESYNC_PP)) return false;
+    bitbang_clocks(s_align_clocks, false);
+
+    // INITIAL PRE-SYNC is 329 PP of training pattern. Receive the first 328 as one row --
+    // this is the only moment the sensor is guaranteed to be sending a known pattern before
+    // any image, so it is where "is there a sensor at all?" gets answered -- and clock the
+    // remaining PP, so the phase count is exactly what it would have been.
+    start_row(s_row[0]);
+    if (!wait_row()) {
+        s_rx.disable();
+        return false;
+    }
+    for (uint32_t i = 0; i < ROW_PP; i++) {
+        const uint16_t w = pp_at(s_row[0], i);
+        if (w == WORD_PRESYNC || w == WORD_TRAINING) s_presync_training++;
+    }
+    if (!clock_pp_discard(PRESYNC_PP - ROW_PP)) return false;
+    if (require_sensor && s_presync_training < ROW_PP / 2) return false;
 
     // SYNC + DELAY, then the first frame, which is discarded: its exposure is invalid
     // (confirmed saturated in the reference capture, spec.md section 3.5).

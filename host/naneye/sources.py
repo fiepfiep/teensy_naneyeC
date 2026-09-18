@@ -68,7 +68,9 @@ class DeviceSource(Source):
         self._log += self.device.ask(text)
 
     def frames(self):
-        for packet in self.device.reader:
+        # packets(), not the raw reader: the reader reports a quiet line as "no packet",
+        # which would end the viewer the first time the device paused.
+        for packet in self.device.packets():
             if packet.is_image:
                 yield _decode(packet)
             elif packet.header.type in (protocol.TYPE_LOG, protocol.TYPE_RESPONSE):

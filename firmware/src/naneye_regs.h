@@ -146,6 +146,9 @@ constexpr ClockSetting CLOCKS[] = {
     {12375000u, 6, 2, 0},  // vs 12.3 MHz nominal, +0.6 % -> ~9.6 fps
     {24750000u, 2, 1, 0},  // vs 24.7 MHz nominal, +0.2 % -> ~19.3 fps
     {49500000u, 0, 0, 0},  // vs 49.1 MHz nominal, +0.8 % -> ~38.6 fps
+    // Bring-up only: the nearest this root clock gets to the reference host's 31.25 MHz,
+    // with the reference's own clock bits (default MCLK, high speed = 31.1 MHz), +6 %.
+    {33000000u, 1, 1, 1},
 };
 constexpr uint32_t CLOCK_COUNT = sizeof(CLOCKS) / sizeof(CLOCKS[0]);
 

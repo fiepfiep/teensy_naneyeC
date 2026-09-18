@@ -25,6 +25,38 @@ Teensy VUSB ────────────── J2.2 / J2.4   (5vs)
 Teensy GND ─────────────── J2.6, 14, 20, 25   (and J2.9 = GNDL if using the LEDs)
 ```
 
+### Bench setup: connections and probe map
+
+The current bench, illumination not wired. Each signal is listed with where it enters the
+NanoBerry and where the Saleae sees it.
+
+| Signal | Teensy 4.1 | NanoBerry J2 | Board net → sensor pad | Saleae, Teensy side | Saleae, board side |
+|---|---|---|---|---|---|
+| SCLK | pin 27 (`LPSPI3_SCK`) | J2.23 | `NanEye_SCK_RP` → R20 24 Ω → **S1.B1** (SCLK/DATA−) | **D3** | **D6** |
+| SDAT, out | pin 26 (`LPSPI3_SDO`) | J2.19, tied with pin 1 | `Naneye_Data_RP` → R23 24 Ω → **S1.B2** (SDAT/DATA+) | **D2** | **D5** |
+| SDAT, in | pin 1 (`LPSPI3_SDI`) | J2.19, tied with pin 26 | same net as above | **D0** | **D5** |
+| Sensor power enable | pin 2 | J2.33 | `Naneye_EN` → TPS71701 EN (R19 10 k pull-down) | **D1** | — |
+| Sensor supply | — | — | `VCC_SENSOR`, TPS71701 output, 3.3 V → **S1.A1** (VDDA) | — | **D4** |
+| 5 V | VUSB | J2.2 / J2.4 | `5vs` → TPS71701 input | — | — |
+| Ground | GND | J2.6, 14, 20, 25 | `GND` → **S1.A2** (VSS) | Saleae GND | Saleae GND |
+| *(unused)* | | | | D7 | |
+
+Notes on the probe map:
+
+- **D0 and D2 are the same net** once pins 1 and 26 are tied at J2.19, so they read
+  identically; together they only confirm the tie. With the board disconnected they differ,
+  which is how the no-sensor captures could see pin 26's drive separately from pin 1.
+- **D5 is SDAT on the sensor side of R23.** Compared with D0/D2 it shows what the resistor
+  and wiring do to the edges, and — since the sensor drives SDAT during readout — the return
+  half of the round-trip delay. **D6 is SCLK on the board side**, likewise. On the board these nets are
+  also brought out on P1: pin 2 `VCC_SENSOR`, pin 3 SDAT, pin 4 SCLK.
+- **D4 sees the switched sensor rail**, not the 5 V input, so it should stay low until
+  `POWER 1` and rise when EN does. Sampled as analog, it also shows the rail's ramp, which
+  is what the firmware's 5 ms settle delay before the first clock is betting on.
+- A probe adds roughly 10 pF plus lead capacitance to a node. On D5 that lands
+  directly on the sensor's pads, in the timing-critical direction; worth remembering before
+  reading setup margins at 49.5 MHz.
+
 Pin choices are in `firmware/src/board.h`. LPSPI3 ("SPI1") fixes 27/26/1; LPSPI3 was picked
 over the default LPSPI4 to keep a 12–50 MHz clock off pin 13 and its onboard LED
 capacitance.
@@ -259,6 +291,30 @@ the shape you want.
 | `end-of-interface PP: 0x015` | the datasheet is right that the sensor drives the last interface PP — releasing it avoided contention every frame |
 | `end-of-interface PP: 0x000` | the sensor stays silent there; AN000611's drive-all-648 recipe would have been harmless |
 | `end-of-interface PP` anything else | phase accounting is off by some bits — fix this before trusting any image ([why](datasheet-crosscheck.md#9-board-population-and-who-owns-sdat-in-the-last-pp)) |
+
+### First light: what it took (2026-09-18)
+
+The sensor itself was fine from the first power-up. Three faults on our side hid that, and
+they are worth knowing because each one looked like a sensor problem:
+
+1. **Stale cache, not a silent sensor.** `LISTEN` read all zeros, or endless `0xAAA`. The
+   logic analyser showed the sensor streaming perfect frames on pin 1 the whole time: the
+   row buffers are `DMAMEM`, which is cached, and nothing invalidated them after the DMA.
+   Fixed in `start_row()` / `wait_row()`. Lesson: when the firmware and the wire disagree,
+   believe the wire.
+2. **The datasheet start sequence.** It started only sometimes, and its counted phase put
+   every row 2 clocks late (all 320 rows failed, bright areas wrapped). `START` now uses the
+   reference host's sequence and *locks* onto the row phase from the bits (spec §6.4).
+3. **Power-off too short.** The sensor rail takes ~630 ms to fall below 0.1 V; a 0.4 s
+   power cycle gave unreliable starts. `power(true)` now enforces ≥ 1 s off.
+
+Tools that found them: `tools/show_bringup.py` (overview plot of a start),
+`tools/check_alignment.py` (where every row transfer lands relative to the sensor's rows),
+and `LISTEN n` / `START REF [VERBATIM] [FAST] [EARLY] [FIRST] n` for classifying what the
+sensor sends without any assumptions about phase.
+
+Result at 12.375 MHz: 5/5 starts, 0 failed rows, 0 dropped frames, 8.4 fps; `EXP` changes
+brightness linearly (733 → 350 DN from 102 ms to 1.3 ms), so interface-window writes land.
 
 ### M3 — first frame
 

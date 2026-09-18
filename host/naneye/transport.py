@@ -92,11 +92,15 @@ class PacketReader:
             if not self._fill(total):
                 return None
             payload = bytes(self._buf[protocol.HEADER_SIZE:total])
-            del self._buf[:total]
 
             if not protocol.check_packet(header, payload):
+                # Skip only the magic word, not the whole claimed length. A packet that was
+                # cut short on the wire claims bytes that really belong to the packets after
+                # it; discarding payload_len of them would swallow those too.
                 self.bad_crc += 1
+                del self._buf[:len(protocol.MAGIC)]
                 continue
+            del self._buf[:total]
             return Packet(header, payload)
 
     def __iter__(self) -> Iterator[Packet]:
@@ -108,12 +112,32 @@ class PacketReader:
 
 
 class Device:
-    """A Teensy on a USB serial port."""
+    """A Teensy on a USB serial port.
 
-    def __init__(self, port: str, timeout: float = 1.0):
-        import serial  # imported lazily so the decoder works without pyserial
+    The port is opened with a short read timeout, set once and never changed. Two lessons
+    from the first session against hardware are behind that:
 
-        self.serial = serial.Serial(port, 115200, timeout=timeout)
+    - Changing the timeout reconfigures the port, and on Windows doing that between sending
+      a command and reading its reply discarded replies the device had already sent.
+    - PacketReader reports a read timeout as "no packet", so with a long timeout a live
+      stream ended on any lull longer than it. Here a quiet line is a pause: packets() keeps
+      waiting, and ask() treats one quiet read as "the device has finished answering".
+    """
+
+    PJRC_VID = 0x16C0
+    READ_TIMEOUT = 0.15  # one quiet read; long enough to span USB and driver latency
+
+    def __init__(self, port: str | None = None, timeout: float = READ_TIMEOUT, ser=None):
+        """Open `port`, or wrap an already-open serial-like object passed as `ser`.
+
+        Anything with read(n), write(b) and flush() will do, which is what lets the command
+        logic be tested without hardware.
+        """
+        if ser is None:
+            import serial  # imported lazily so the decoder works without pyserial
+
+            ser = serial.Serial(port, 115200, timeout=timeout)
+        self.serial = ser
         self.reader = PacketReader(self.serial.read)
 
     @staticmethod
@@ -127,37 +151,58 @@ class Device:
         return teensy + [p for p in ports if p not in teensy]
 
     @classmethod
-    def open_first(cls, timeout: float = 1.0) -> "Device":
-        ports = cls.find_ports()
-        if not ports:
-            raise RuntimeError("no serial ports found; is the Teensy plugged in?")
-        return cls(ports[0].device, timeout=timeout)
+    def open_first(cls, timeout: float = READ_TIMEOUT) -> "Device":
+        """The first Teensy found. Never falls back to some other serial port: sending
+        START to a modem or a management console is worse than failing."""
+        teensy = [p for p in cls.find_ports() if p.vid == cls.PJRC_VID]
+        if not teensy:
+            raise RuntimeError(
+                "no Teensy serial port found (USB VID 0x16C0). Is it plugged in and running "
+                "the USB Serial firmware? A Teensy running a Raw HID sketch has no COM port.")
+        return cls(teensy[0].device, timeout=timeout)
 
     def command(self, text: str) -> None:
-        """Send an ASCII command line (the device also accepts framed commands)."""
+        """Send an ASCII command line. Host to device is plain text; replies are framed."""
         self.serial.write((text.strip() + "\n").encode())
         self.serial.flush()
 
     def ask(self, text: str, timeout: float = 2.0) -> list:
-        """Send a command and collect the response/log packets it produces."""
+        """Send a command and collect every response/log packet it produces.
+
+        Waits up to `timeout` for the first reply -- some commands, like PROBE, run a whole
+        frame cycle before answering -- then stops at the first quiet read, which means the
+        device has finished. Two-reply commands such as SELFTEST send back to back, so both
+        arrive before the line goes quiet.
+
+        While streaming the line is never quiet, so an image arriving after the replies ends
+        the collection too: the firmware finishes any image in flight, sends every reply,
+        and only then starts the next image.
+        """
         self.command(text)
         out = []
         deadline = time.time() + timeout
         while time.time() < deadline:
             p = self.reader.next_packet()
             if p is None:
-                break
+                if out:
+                    break  # replies have arrived and the line has gone quiet
+                continue   # nothing yet: keep waiting for a slow command
             if p.header.type in (protocol.TYPE_RESPONSE, protocol.TYPE_LOG):
                 out.append(p.text)
-                # Responses arrive promptly; stop once the stream goes quiet.
-                if not self.serial.in_waiting:
-                    break
-            elif p.is_image:
-                continue
+            elif p.is_image and out:
+                break  # streaming: the replies are complete once an image follows them
         return out
 
+    def packets(self) -> Iterator[Packet]:
+        """Every packet, indefinitely. A quiet line is a pause, not the end of the stream:
+        a device that drops frames for a while must not end the caller's loop."""
+        while True:
+            p = self.reader.next_packet()
+            if p is not None:
+                yield p
+
     def frames(self) -> Iterator[Packet]:
-        for p in self.reader:
+        for p in self.packets():
             if p.is_image:
                 yield p
 
