@@ -40,19 +40,49 @@ capacitance.
 
 ### Why SDAT goes to two pins
 
-SDAT is half-duplex, shared by time. Tying pin 26 (`LPSPI3_SDO`) and pin 1 (`LPSPI3_SDI`)
-together at the header means the direction flip is a single IOMUXC write, with no
-peripheral-behaviour unknowns:
+SDAT is half-duplex, shared in time. One pin would do — this is a bring-up scaffold, not a
+hardware constraint.
 
-| Phase | Pin 26 | Pin 1 |
+| Phase | Pin 26 (`LPSPI3_SDO`) | Pin 1 (`LPSPI3_SDI`) |
 |---|---|---|
-| INTERFACE MODE | `LPSPI3_SDO`, driving | reads (harmless) |
+| INTERFACE MODE | driving | reads (harmless, and useful — see below) |
 | SYNC / DELAY / READOUT | GPIO input, hi-Z | reads sensor data |
 
-`TCR[TXMSK]` also tristates the output during readout, so this is belt and braces. A
-single-pin variant using `CFGR1[PINCFG]=10b` would save a wire and ~5 pF; the Raspberry Pi
-reference does exactly that (SPI0 MOSI on J2.19, MISO unconnected), so it is known to work
-electrically. Deferred to M7.
+**There is no contention between the two Teensy pins.** Pin 1 is only ever an input; pin 26
+is the only one that can drive, and only during INTERFACE MODE. It is one driver and two
+listeners on the net, not two drivers. Teensy pins are inputs at reset, so nothing drives
+SDAT before firmware runs either.
+
+The reason for two pins is that it uses LPSPI in its most ordinary configuration —
+full-duplex master, `PINCFG=00` — where nothing about the data path is in question. All the
+half-duplex behaviour then lives in something that can be reasoned about with certainty:
+which pin is muxed as an output at any instant, one register write. For firmware that has
+never run against the sensor, that trade is worth a wire.
+
+It also buys a diagnostic: because pin 1 listens while pin 26 drives, the Teensy can read
+back its own register writes. During M1 that separates "my driver is not working" from "the
+sensor is not responding", which are otherwise indistinguishable. A single pin in 3-wire
+mode does not give that for free.
+
+**The cost** is one extra wire and roughly 5 pF of pad capacitance on a node that already
+carries C13's 15 pF plus connector stubs, in a setup window measured at only ~12 ns at
+49.5 MHz — plus a short T-stub between the two pins and the header. Irrelevant at
+12–25 MHz, a real consideration at 49.5 MHz. That is why single-pin is the M7 optimisation
+and would be the right choice for a final design.
+
+!!! note "What actually remains unverified about single-pin mode"
+    `CFGR1[PINCFG]=10b` makes SOUT carry input and output both. Teensyduino already sets
+    **SION** on the SDO mux (its mux constants are `2 | 0x10`), so the pad's input buffer is
+    on — that part is not a concern. What cannot be checked without hardware is whether the
+    receive path is routed from the SOUT pad in that mode and whether `TXMSK` tristates it
+    reliably at the phase boundary. The Raspberry Pi reference runs SDAT on SPI0 MOSI with
+    MISO unconnected, so single-pin half-duplex is known to work *electrically* on this
+    board; it is the peripheral configuration that is untested, not the wiring.
+
+Neither an external transceiver nor bit-banging is a sensible alternative. A transceiver
+adds propagation delay in both directions, and the ~8 ns round trip is already what caps the
+clock rate; its direction pin would also have to turn around inside a bit period. Bit-banging
+cannot reach 12–50 Mbit/s while also feeding DMA.
 
 ## Power
 
