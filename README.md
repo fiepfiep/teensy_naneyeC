@@ -9,8 +9,12 @@ through a Teensy 4.1, over the sensor's half-duplex single-ended interface (SEIM
 0 failed rows. Below the image are the frame statistics, the exposure and register
 settings, and the histogram.*
 
-Read [spec.md](spec.md) first — it is the living design record: decisions, the measured
-ground truth from a working reference link, milestones and risks.
+**New here?** Follow [Getting started](docs/getting-started.md): parts, wiring, flashing
+and your first image, with a troubleshooting table. The full documentation is published at
+<https://fiepfiep.github.io/teensy_naneyeC/>. [spec.md](spec.md) is the living design
+record: decisions, measured ground truth, milestones and risks.
+
+![The bench setup: Teensy 4.1 on a breadboard wired to the NanoBerry board](docs/images/bench-setup.jpg)
 
 Full documentation is an MkDocs site under [docs/](docs/) — overview, hardware and bring-up,
 firmware architecture, host usage and API, and a distilled SEIM protocol reference:

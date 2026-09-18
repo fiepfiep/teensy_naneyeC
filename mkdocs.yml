@@ -27,12 +27,17 @@ theme:
 
 nav:
   - Overview: index.md
-  - Design record (spec.md): design.md
-  - Hardware and bring-up: hardware.md
-  - Firmware architecture: firmware.md
-  - Host usage and API: host.md
-  - SEIM protocol reference: seim.md
-  - Datasheet cross-check: datasheet-crosscheck.md
+  - Getting started: getting-started.md
+  - Using it:
+      - Hardware and bring-up: hardware.md
+      - Host software: host.md
+  - How it works:
+      - Firmware architecture: firmware.md
+      - SEIM protocol reference: seim.md
+  - Reference:
+      - Design record (spec.md): design.md
+      - Datasheet cross-check: datasheet-crosscheck.md
+      - Glossary: glossary.md
 
 plugins:
   - search

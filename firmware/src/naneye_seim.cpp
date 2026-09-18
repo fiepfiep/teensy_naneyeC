@@ -649,7 +649,7 @@ static bool start_like_reference(Config1 c1, bool require_sensor) {
     if (require_sensor && s_presync_training < ROW_PP / 2) return false;
 
     // Lock onto the first frame's rows, then discard the rest of it: its exposure is invalid
-    // (datasheet 6.3.3; confirmed saturated in the reference capture, spec.md section 3.5).
+    // (datasheet 6.3.2.2; confirmed saturated in the reference capture, spec.md section 3.5).
     if (!lock_row_phase() && require_sensor) return false;
 
     s_first_frame_after_por = false;

@@ -1,13 +1,32 @@
 # Hardware and bring-up
 
+How the Teensy is wired to the NanoBerry, why it is wired that way, and the staged
+procedure used to bring the link up. To just build one, [Getting started](getting-started.md)
+is shorter; this page is the full story behind it. Unfamiliar terms are in the
+[glossary](glossary.md).
+
+## The bench in the photo
+
+![The bench setup](images/bench-setup.jpg)
+
+| In the photo | What it is |
+|---|---|
+| Green board on the left of the breadboard | **Teensy 4.1**, powered and connected to the PC by the black USB cable on the far left |
+| Black board on the right, "ams" logo | **NanoBerry** with the NanEyeC. It plugs, by its 40-pin Raspberry Pi header `J2`, into a header socket on the breadboard, so every `J2` pin appears on a breadboard row |
+| Short coloured wires on the breadboard | Teensy pins to `J2` pins: SCLK, SDAT, sensor enable, 5 V and ground ([table below](#wiring)) |
+| Red box at the back | **Saleae Logic Pro 16** logic analyser. Its leads with white tips probe the Teensy side of the link and, clipped to the small header on top of the NanoBerry (`P1`), the sensor side. Development only; the camera runs without it |
+| Red, black and green binding posts | Part of the breadboard, unused |
+
+It is deliberately an ordinary breadboard build: jumper wires, no custom PCB. That is also
+what limits the clock to 24.75 MHz ([clock rates](#clock-rates)).
+
 ## What is on the bench
 
-- **NanoBerry board** with a NanEyeC mounted as `S1` (mono, confirmed by measurement),
-  exposing a 40-pin Raspberry Pi header `J2`, plus `J1` (FPC) and `P1` (6-pin) on the same
-  sensor nets.
-- **Teensy 4.1**, 600 MHz i.MX RT1062. 3.3 V I/O, not 5 V tolerant.
-- **Saleae Logic Pro 16** — 500 MS/s on up to 2 channels, which is what the 12–50 MHz link
-  needs.
+- **NanoBerry board** with a NanEyeC mounted as `S1` (the monochrome version, confirmed by
+  measurement). It exposes the sensor on a 40-pin Raspberry Pi header `J2`, and on `J1`
+  (FPC) and `P1` (6-pin), which share the same sensor nets.
+- **Teensy 4.1**: 600 MHz i.MX RT1062 microcontroller, 3.3 V I/O, not 5 V tolerant.
+- **Saleae Logic Pro 16** (development only): 500 MS/s on a few channels, 250 MS/s with 7.
 
 ## Wiring
 
@@ -131,8 +150,9 @@ window, for no benefit at all.
 !!! danger "Three things that will waste your afternoon"
     - **The sensor is powered off at reset.** `NanEye_EN` has a 10 k pulldown, so nothing
       responds until pin 2 is driven high. `POWER 1` does this; `START` does it implicitly.
-    - **Leave `J1` and `P1` unconnected.** They sit on the same `D+`/`D-` nets as the
-      onboard sensor. Anything plugged in there contends on the bus.
+    - **Nothing that drives a signal on `J1` or `P1`.** They sit on the same `D+`/`D-`
+      nets as the onboard sensor, so anything that drives them fights the bus. A
+      logic-analyser probe does not drive, so probing `P1` is fine (the photo does it).
     - **Keep SCLK and SDAT short, each with its own adjacent ground return.** At 24.75 MHz
       on flying leads this is the difference between working and not. The measured setup
       window is ~32 ns at that rate — don't spend it on wire.
@@ -155,8 +175,9 @@ SDAT before firmware runs either.
 The reason for two pins is that it uses LPSPI in its most ordinary configuration —
 full-duplex master, `PINCFG=00` — where nothing about the data path is in question. All the
 half-duplex behaviour then lives in something that can be reasoned about with certainty:
-which pin is muxed as an output at any instant, one register write. For firmware that has
-never run against the sensor, that trade is worth a wire.
+which pin is muxed as an output at any instant, one register write. For firmware written
+before it had ever met the sensor, that trade was worth a wire, and it paid off during
+bring-up.
 
 It also buys a diagnostic: because pin 1 listens while pin 26 drives, the Teensy can read
 back its own register writes. During M1 that separates "my driver is not working" from "the
@@ -166,15 +187,15 @@ mode does not give that for free.
 **The cost** is one extra wire and roughly 5 pF of pad capacitance on a node that already
 carries C13's 15 pF plus connector stubs, in a setup window measured at only ~12 ns at
 49.5 MHz — plus a short T-stub between the two pins and the header. Irrelevant at
-12–25 MHz, a real consideration at 49.5 MHz. That is why single-pin is the M7 optimisation
-and would be the right choice for a final design.
+12–25 MHz, a real consideration at 49.5 MHz. That is why single-pin would be the right
+choice for a final design, and one of the things to try before attempting 49.5 MHz again.
 
 !!! note "What actually remains unverified about single-pin mode"
     `CFGR1[PINCFG]=10b` makes SOUT carry input and output both. Teensyduino already sets
     **SION** on the SDO mux (its mux constants are `2 | 0x10`), so the pad's input buffer is
-    on — that part is not a concern. What cannot be checked without hardware is whether the
-    receive path is routed from the SOUT pad in that mode and whether `TXMSK` tristates it
-    reliably at the phase boundary. The Raspberry Pi reference runs SDAT on SPI0 MOSI with
+    on — that part is not a concern. What has not been tested is whether the receive path
+    is routed from the SOUT pad in that mode and whether `TXMSK` tristates it reliably at
+    the phase boundary. The Raspberry Pi reference runs SDAT on SPI0 MOSI with
     MISO unconnected, so single-pin half-duplex is known to work *electrically* on this
     board; it is the peripheral configuration that is untested, not the wiring.
 
@@ -223,13 +244,27 @@ in the firmware but it changes what the numbers mean.
 ## Bring-up
 
 Staged, each stage with something that can actually fail. Do not skip ahead: a wrong answer
-at M2 looks exactly like a wrong answer at M3 if you never checked M2.
+at M2 looks exactly like a wrong answer at M3 if you never checked M2. The milestones are
+defined in the [design record](design.md) (spec.md §9).
+
+| Stage | What it proves | Status |
+|---|---|---|
+| M0 | firmware runs, decode is right (no camera needed) | done |
+| M1 | clock and register writes reach the sensor | done |
+| M2 | the sensor answers with training patterns | done |
+| M3 | a complete, valid frame | done, 0 failed rows |
+| M4 | continuous streaming without loss | done at 24.75 MHz for 200 frames; the 60 s soak is still to run |
+| M5 | exposure control | exposure done; LED illumination not yet tested |
+| M6 | measurement readiness: dark frames, noise | not started |
+
+What it took to get to first light, including three faults that looked like sensor problems
+and were not, is in [First light](#first-light-what-it-took-2026-09-18) below.
 
 ### M0 — before the camera is connected
 
 ```bash
-uv run pytest                                     # 42 tests
-uv run python -m platformio run -d firmware -t upload
+uv run pytest                                     # 53 tests
+uv run --group firmware python -m platformio run -d firmware -t upload
 ```
 
 Then, with only USB attached:
@@ -262,8 +297,13 @@ Capture, export as CSV with columns `Time, data, clk`, then:
 uv run python tools/decode_golden.py path/to/capture.csv --out build/m1
 ```
 
-**Pass:** the activation clock, then `CONFIG_0=0x009F`, `CONFIG_1=0x009F`, then
-`CONFIG_1=0x0065`, bit-identical to the reference sequence, at 12.375 MHz.
+**Pass:** the activation clock, then `CONFIG_0` and `CONFIG_1` with idle set, one frame's
+worth of clocks, then both again with idle cleared: the reference host's sequence
+([design record](design.md) §6.4). At 12.375 MHz `START` writes `CONFIG_0=0x009F`, then
+`CONFIG_1=0x009E` (idle) and `0x009C` (running). The reference host wrote `0x009F` and
+`0x0065`: its clock-mode bits differ because it ran at 31.25 MHz, and its running value
+also uses the datasheet's recommended `vref` and `cvc_curr`, which ours does not yet.
+`tools/show_bringup.py` captures and plots this in one go.
 
 **If SCLK is absent:** the LPSPI root clock or pin mux is wrong, not the sensor.
 **If SCLK runs but SDAT never leaves idle:** the sensor is not powered (check `NanEye_EN`
@@ -286,7 +326,7 @@ the shape you want.
 |---|---|
 | all `0x000` | sensor not driving — power, or SDAT not connected |
 | all `0xFFF` | SDAT stuck high, or we never released the bus (direction switch failed) |
-| plausible but non-training words | word alignment is off — suspect the activation/alignment clock counts in `seim::start()` |
+| plausible but non-training words | word alignment is off; `LISTEN` and `tools/check_alignment.py` show where the rows really are |
 | `0xAAA` when expecting `0x555` | this is the first frame after power-on; normal |
 | `end-of-interface PP: 0x015` | the datasheet is right that the sensor drives the last interface PP — releasing it avoided contention every frame |
 | `end-of-interface PP: 0x000` | the sensor stays silent there; AN000611's drive-all-648 recipe would have been harmless |
@@ -316,7 +356,9 @@ sensor sends without any assumptions about phase.
 Result at 12.375 MHz: 5/5 starts, 0 failed rows, 0 dropped frames, 8.4 fps; `EXP` changes
 brightness linearly (733 → 350 DN from 102 ms to 1.3 ms), so interface-window writes land.
 
-Clock rates on the bench wiring (jumper wires, Saleae probes on SDAT at both ends):
+### Clock rates
+
+On the bench wiring (jumper wires, Saleae probes on SDAT at both ends):
 
 | SCLK | Result |
 |---|---|
@@ -389,7 +431,10 @@ SCLK-versus-MCLK mismatch, which is the one parameter we deliberately left at �
 
 ## Probing notes
 
-- 500 MS/s on ≤2 channels is a Logic Pro 16 limit — don't add channels during timing work.
+- The Logic Pro 16 trades channels for sample rate: 500 MS/s on a few channels, 250 MS/s
+  with 7 (what the bring-up tools use: 20 samples per clock at 12.375 MHz). With analog
+  channels enabled only specific digital/analog rate pairs are allowed; the error message
+  lists them.
 - 0.38 s at 500 MS/s is 434 MB as CSV. Prefer the binary export and keep captures short;
   one frame is 52 ms at 24.75 MHz.
 - `tools/decode_golden.py` caches its sampled bit stream as `bits.npy`, so re-analysis is

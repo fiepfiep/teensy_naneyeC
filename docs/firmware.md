@@ -1,7 +1,15 @@
 # Firmware architecture
 
-Teensy 4.1 (i.MX RT1062, 600 MHz), PlatformIO + Teensyduino, with direct register access for
-LPSPI, DMA and IOMUXC. Build: `uv run --group firmware python -m platformio run -d firmware`.
+How the Teensy firmware works, for anyone changing it. It runs on a Teensy 4.1 (i.MX RT1062,
+600 MHz) and is built with PlatformIO and the Teensyduino core, but talks to the SPI, DMA
+and pin-mux hardware through its registers directly, because the Arduino SPI library cannot
+do what the sensor needs. Terms are explained in the [glossary](glossary.md); the sensor's
+protocol in the [SEIM reference](seim.md).
+
+```bash
+uv run --group firmware python -m platformio run -d firmware              # build
+uv run --group firmware python -m platformio run -d firmware -t upload    # build and flash
+```
 
 ## Files
 
@@ -9,15 +17,16 @@ LPSPI, DMA and IOMUXC. Build: `uv run --group firmware python -m platformio run 
 |---|---|---|
 | `naneye_regs.h` | register model, frame geometry, exposure and clock maths | no — pure logic |
 | `seim_unpack.h` | 12-bit pixel-period extraction from 32-bit words | no — pure logic |
-| `naneye_seim.cpp` | LPSPI3 + DMA driver, phase sequencer | **yes, and unproven** |
+| `naneye_seim.cpp` | LPSPI3 + DMA driver, start-up, row lock, phase sequencer | **yes**: the part that talks to the sensor |
 | `led_dac.cpp` | LTC2630 bit-bang | yes, simple |
 | `usb_proto.cpp` | framing, CRC-32 | no |
 | `main.cpp` | command interface, streaming loop, transmit pump | no |
+| `watchdog.cpp` | RTWDOG hardware watchdog | yes, simple |
 | `golden_vector.h` | GENERATED test vector, one real sensor row | no |
 | `board.h` | pin assignment | — |
 
 The split is deliberate: everything that can be reasoned about without a sensor is in the
-pure-logic headers, and `SELFTEST` exercises them on the device. The untestable part is
+pure-logic headers, and `SELFTEST` exercises them on the device. The hardware-facing part is
 confined to one file.
 
 ## The central idea: a phase sequencer
@@ -25,8 +34,38 @@ confined to one file.
 A frame is a **deterministic sequence of clock counts** (see
 [frame structure](seim.md#frame-structure)). The sensor's state machine advances on the
 clocks we supply, so if we emit exactly the right number in each phase and flip the SDAT
-direction at the boundaries, we stay aligned by construction. There is no clock recovery, no
-PLL, no search loop in steady state.
+direction at the boundaries, we stay aligned by construction. There is no clock recovery and
+no PLL. There is exactly one search, at start-up (next section); after it, everything is
+counted.
+
+## Starting the sensor
+
+`seim::start()` is the one place that cannot be pure counting:
+
+1. **Power-cycle.** The sensor needs a clean power-on reset, and the NanoBerry's rail takes
+   ~630 ms to discharge, so `power(true)` waits until the rail has been off at least 1 s.
+2. **The reference host's sequence**: one activation clock, `CONFIG_0` + `CONFIG_1` with
+   idle set (bit-banged at ~1 MHz), one frame's worth of clocks with SDAT low, then both
+   registers again with idle cleared and the rest of a 648-PP window of zeros. SDAT is then
+   released.
+3. **Presence check.** The first received row must be mostly training pattern; if not,
+   `START` reports that no sensor is answering.
+4. **Row lock** (`lock_row_phase()`). How many clocks the first frame's training lasts
+   varies slightly from start to start (measured: 12,074–12,084 bits, not a whole number
+   of pixel periods), so the row timing is *found*. The firmware scans the received bits
+   for row 1's 8 training words followed by pixel 0's start bit, clocks exactly the number
+   of bits needed to reach the next row boundary, and checks that row starts with 8
+   training words.
+5. **Discard the rest of the first frame**, which is overexposed. Streaming then starts at
+   the next interface window.
+
+The datasheet's shorter sequence (AN000611: a single idle-off write) is still available as
+`START AN` for comparison. On this board it started only sometimes, and its counted phase
+left every row 2 clocks late.
+
+## One frame, in steady state
+
+Once locked, `capture_frame()` runs the same fixed sequence every frame:
 
 ```
 capture_frame():
@@ -169,8 +208,9 @@ makes that true.
 Every row is validated: the 8 training words must match, and all 320 pixel words must have
 start = 1 and stop = 0. This is cheap, and since it passed 100 % across the reference
 capture, any failure is signal rather than noise. Failures are counted per frame and
-reported in the header; a failed capture triggers a re-run of `start()`. Cycling
-`NanEye_EN` is the recovery of last resort.
+reported in the header. A capture that fails outright (the hardware stops responding)
+triggers a full re-start, which power-cycles the sensor. If the firmware itself hangs, the
+[watchdog](#watchdog) resets the Teensy.
 
 ## Register writes land one frame late
 
@@ -227,12 +267,13 @@ That is harmless.
 
 ## Known risks
 
-Ordered by how likely they are to bite, all carried in the [design record](design.md):
+The design record carries the full list. Where the risks identified before bring-up ended
+up:
 
-1. Whether a bare `TCR` write with `TXMSK=1` really initiates a receive-only frame with no
-   TX data. If not, a TX DMA feeding dummy words is needed.
-2. Whether `pinMode(INPUT)` plus `TXMSK` releases SDAT quickly enough at the
-   INTERFACE→SYNC boundary.
-3. The clock accounting in `start()` — our counts and the sensor's state machine must agree
-   to the bit, and the initial sequence has the least margin for error.
-4. Signal integrity above 24.75 MHz on flying leads; `SAMPLE` (`CFGR1[SAMPLE]`) is the knob.
+| Risk | Outcome |
+|---|---|
+| A bare `TCR` write with `TXMSK=1` might not start a receive-only frame | Works: every row is received this way |
+| SDAT might not be released fast enough at the INTERFACE→SYNC boundary | Works: the sensor owns the last pixel period of the window, so there is a full PP of margin |
+| Clock accounting in `start()` must agree with the sensor to the bit | It could not, because the first frame's length varies. Replaced by the [row lock](#starting-the-sensor) |
+| Signal integrity above 24.75 MHz on flying leads | Confirmed: 49.5 MHz fails on jumper wires ([why](hardware.md#clock-rates)). `SAMPLE 1` helps timing but not the slow edges |
+| *Not foreseen:* DMA buffers in cached memory | Found and fixed: the cache is invalidated around every row transfer |

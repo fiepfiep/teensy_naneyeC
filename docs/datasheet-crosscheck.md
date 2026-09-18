@@ -266,10 +266,23 @@ contention if not; receiving means M2 answers the question outright:
 That third row is the useful by-product: the word lands in a fixed place in every frame, so
 it doubles as a per-frame alignment check once its expected value is known.
 
-## 10. Still unverifiable without hardware
+## 10. Still open
 
-- The three LPSPI risks in the [firmware page](firmware.md#known-risks): receive-only
-  framing via `TXMSK`, SDAT release timing, and the clock accounting in `start()`.
+Written before any hardware was attached; updated after first light (2026-09-18).
+
+- *Resolved on hardware:* the three LPSPI risks (receive-only framing via `TXMSK`, SDAT
+  release timing, and the clock accounting in `start()`). The first two work as designed.
+  The third could not work as designed, because the first frame's length varies, and was
+  replaced by a row lock. See the [firmware page](firmware.md#known-risks).
+- *Found on hardware:* the datasheet's start sequence (AN000611) was unreliable on this
+  board, and the NanoBerry's sensor rail needs about 1 s off for a clean power-on reset.
+  Both are in the [design record](design.md) (§4.2, §6.4).
+- **Our running `CONFIG_1` does not use the recommended analog settings.** It keeps
+  `vref = 01` and `cvc_curr = 11` from the reference host's first write, where the
+  datasheet recommends `vref = 10` (2.1 V, 0.1 V below `offset_ramp`) and `cvc_curr = 01`,
+  and where the reference host's own running value `0x0065` uses them. This may account
+  for part of the high black level (~420 DN) and should be tried first when tuning image
+  quality.
 - **The LED current formula rests on a part-number inference.** `I_LED ≈ V_DAC / 56 Ω`
   with a 0–2.5 V DAC assumes the `-LZ12` suffix means 2.5 V full scale and power-on reset
   to zero scale. The LTC2630 datasheet is *not* in `doc/`; this came from the part number
