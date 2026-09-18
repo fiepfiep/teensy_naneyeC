@@ -51,9 +51,10 @@ still defines the DC level, which is what matters here, but it settles more slow
 SDAT wander on the Saleae while idle, **fit 10k at R13 and R33** — the pads are on the
 board. Loading is not a concern at that value: 0.33 mA against a sensor driver of 3.9–9.6 mA.
 
-It is worth confirming the two parts this design leans on hardest while you have the
-magnifier out: **R23** (without it SDAT does not reach the sensor at all) and **R19** (the
-10k pull-down that keeps the sensor unpowered until the Teensy drives `NanEye_EN`).
+Board population, checked part by part: **R19, R20 and R23 are fitted**, **R13 and R33 are
+not**. The three fitted ones are the parts this design cannot do without — R23 carries SDAT
+to the sensor, R20 carries SCLK, and R19 keeps the sensor unpowered until the Teensy drives
+`NanEye_EN`, which also means SCLK cannot glitch the sensor before the firmware runs.
 
 ### Recommended: a series resistor on pin 26
 

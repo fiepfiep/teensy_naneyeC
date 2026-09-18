@@ -31,7 +31,7 @@ dropped-frame accounting, deterministic exposure/gain control, and lossless fram
 | D5 | Bit depth | Runtime-selectable 8-bit / 10-bit |
 | D6 | Clock rate | **Start low: 12.375 MHz, then 24.75 MHz.** Higher rates are a stretch goal |
 | D7 | Illumination | On/off **plus DAC current control** (bit-banged, §4.4). Kept minimal: set current in mA, clamped |
-| D8 | Board population | R23 mounted (so SDAT reaches the sensor). **R13 and R33 — the 10k header pull-downs on SDAT and SCLK — are not fitted**, as the schematic's NoBom marking says; firmware substitutes the pads' internal pull-downs (§4.3). The first answer here was "everything is mounted", corrected 2026-09-18 |
+| D8 | Board population | Checked part by part on 2026-09-18. **Fitted:** R19 (EN pull-down), R20 (SCLK 24R), R23 (SDAT 24R). **Not fitted:** R13 and R33, the 10k header pull-downs on SDAT and SCLK, as the schematic's NoBom marking says; firmware substitutes the pads' internal pull-downs (§4.3). The first answer here was "everything is mounted" |
 | D9 | 5 V rail | Teensy VUSB |
 | D10 | Teensy pins | Claude's choice; nothing reserved |
 
