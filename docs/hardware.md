@@ -13,8 +13,8 @@
 
 ```
 Teensy 27 ──────────────── J2.23 ──[R20 24R]── S1.B1  (SCLK)
-Teensy 26 ┐                                    C11 15pF
-Teensy  1 ┴─ tie at J2 ──── J2.19 ──[R23 24R]── S1.B2  (SDAT, bidirectional)
+Teensy 26 ─[100R]┐                             C11 15pF
+Teensy  1 ───────┴─ tie at J2 ─ J2.19 ─[R23 24R]─ S1.B2  (SDAT, bidirectional)
                                                C13 15pF
 Teensy  2 ──────────────── J2.33 ─ R19 10k pd ─ TPS71701 EN → VCC_SENSOR 3.3 V
 Teensy  3 ──────────────── J2.31   LED_VCC_ON_1
@@ -28,6 +28,46 @@ Teensy GND ─────────────── J2.6, 14, 20, 25   (and
 Pin choices are in `firmware/src/board.h`. LPSPI3 ("SPI1") fixes 27/26/1; LPSPI3 was picked
 over the default LPSPI4 to keep a 12–50 MHz clock off pin 13 and its onboard LED
 capacitance.
+
+### Recommended: a series resistor on pin 26
+
+Fit **100 Ω in series at pin 26**, close to the pin. Not on pin 27, and **not on pin 1**.
+
+The hazard it addresses is contention — the Teensy driving SDAT while the sensor is also
+driving it. §6.3.2.2 says that "would seriously degrade the data integrity and is not
+qualified in terms of device reliability and lifetime": survivable, not warranted. It is
+also not hypothetical. Review found exactly that bug in `start()`, where the alignment
+clocks drove SDAT after idle had been cleared and the sensor had begun transmitting.
+Firmware this young will likely have another.
+
+Today the only thing between the two drivers is the board's `R23` = 24 Ω. The current in a
+fight is bounded by both drivers' output impedances, so it is realistically tens of mA
+rather than the 137 mA that 3.3 V / 24 Ω implies — but that bound depends on assumptions
+about the sensor's output stage. A series resistor replaces the assumption with a number.
+
+The cost lands only on the upstream direction (register writes), where the constraint is the
+sensor's 3 ns setup before the SCLK rising edge. With node capacitance around 35 pF (C13's
+15 pF, two Teensy pads, jumper wire, the J1/P1 stubs, the sensor pad):
+
+| Series R (with R23) | Rise to 90 % | 12.375 MHz (37 ns budget) | 24.75 MHz (17 ns) | 49.5 MHz (7 ns) |
+|---|---|---|---|---|
+| 0 Ω (24 Ω) | ~2 ns | fine | fine | fine |
+| 47 Ω (71 Ω) | ~6 ns | fine | fine | marginal |
+| 100 Ω (124 Ω) | ~10 ns | fine | fine | too slow |
+| 220 Ω (244 Ω) | ~20 ns | fine | marginal | no |
+
+100 Ω is free at the planned 12.375–24.75 MHz (D6). Choose **47 Ω** instead if you want to
+reach 49.5 MHz without rework.
+
+Putting it on pin 26 alone has a second effect worth having: it isolates the SDO pad's ~5 pF
+from the SDAT net during readout, since that capacitance then charges through the resistor.
+That slightly unloads the sensor's driver, helping the *downstream* direction — the one with
+only ~12 ns of setup at 49.5 MHz. So the resistor spends margin where there is 17–37 ns
+spare and returns a little where there is 12 ns.
+
+**Never on pin 1.** That is the receive path; a series resistor there forms an RC with the
+input pad capacitance and delays what the Teensy samples, straight out of the critical setup
+window, for no benefit at all.
 
 !!! danger "Three things that will waste your afternoon"
     - **The sensor is powered off at reset.** `NanEye_EN` has a 10 k pulldown, so nothing
